@@ -217,6 +217,18 @@ def abrir_pagina(url: str) -> str:
     if not url.startswith(("http://", "https://")):
         return "URL inválida. Forneça um endereço iniciando com http ou https."
 
+    # PASSO 2: Lista de fontes que sabemos que não funcionam bem (exigem JavaScript)
+    FONTES_RUINS = [
+        "flashscore.", "sofascore.", "cbf.com.br", "espn.com.br",
+        "palmeiras.com.br", "flamengo.com.br", "corinthians.com.br",
+        "saopaulofc.net", "globoesporte.globo.com/tempo-real"
+    ]
+    
+    if any(ruim in url.lower() for ruim in FONTES_RUINS):
+        log.warning("   url ignorada (fonte ruim conhecida): %s", url[:70])
+        return ("Este site é conhecido por bloquear leitura automatizada ou exigir JavaScript. "
+                "Por favor, IGNORE este site e TENTE A PRÓXIMA URL da lista de resultados.")
+
     if url in _cache_pagina:
         log.info("📄 (cache) %s", url[:70])
         return _cache_pagina[url]
@@ -242,9 +254,12 @@ def abrir_pagina(url: str) -> str:
     texto = re.sub(r"[ \t\xa0]+", " ", texto)
     texto = re.sub(r"\n\s*\n+", "\n", texto).strip()
 
-    if len(texto) < 120:
-        resultado = ("A página não expôs texto útil (provavelmente renderizada "
-                     "por JavaScript). Tente outra fonte.")
+    # PASSO 2: Regra dos 1500 caracteres
+    if len(texto) < 1500:
+        resultado = ("O texto extraído desta página é muito curto ou irrelevante (menos de 1500 caracteres), "
+                     "provavelmente porque o site exige JavaScript e o conteúdo principal não carregou. "
+                     "Por favor, IGNORE este site e tente abrir a PRÓXIMA fonte dos resultados da busca.")
+        log.info("   texto muito curto (%d chars). Instruindo o agente a tentar outro.", len(texto))
     else:
         limite = 8000
         resultado = texto[:limite]
