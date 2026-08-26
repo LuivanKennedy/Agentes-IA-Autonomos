@@ -3,3 +3,4 @@
 __pycache__/
 *.pyc
 main_backup.py
+cache_agente.json

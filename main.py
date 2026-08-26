@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import html
+import json
 import random
 import logging
 from datetime import datetime, timedelta, timezone
@@ -120,9 +121,31 @@ def instrucao_sem_busca() -> str:
     )
 
 
-# ----------------------------------------------------------------- FERRAMENTAS
-_cache_busca: dict[str, str] = {}
-_cache_pagina: dict[str, str] = {}
+# ----------------------------------------------------------------- CACHE EM DISCO E FERRAMENTAS
+ARQUIVO_CACHE = "cache_agente.json"
+
+def carregar_cache() -> dict:
+    """Carrega o cache do disco se o arquivo existir."""
+    if os.path.exists(ARQUIVO_CACHE):
+        try:
+            with open(ARQUIVO_CACHE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"busca": {}, "pagina": {}}
+
+def salvar_cache() -> None:
+    """Salva o cache atual no disco."""
+    try:
+        with open(ARQUIVO_CACHE, "w", encoding="utf-8") as f:
+            json.dump(_cache_geral, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning("Falha ao salvar cache no disco: %s", type(e).__name__)
+
+# Inicializa as variáveis de cache puxando do disco
+_cache_geral = carregar_cache()
+_cache_busca = _cache_geral["busca"]
+_cache_pagina = _cache_geral["pagina"]
 
 _OPERADORES = re.compile(r'\b(site|filetype|inurl|intitle):\S+', re.IGNORECASE)
 
@@ -186,6 +209,7 @@ def buscar_web(consulta: str) -> str:
         resultado = ("Nenhum resultado. Não repita esta consulta; "
                      "reformule ou responda com o que já tem.")
         _cache_busca[chave] = resultado
+        salvar_cache()
         return resultado
 
     log.info("   %d resultados", len(achados))
@@ -198,6 +222,7 @@ def buscar_web(consulta: str) -> str:
     resultado += ("\n\n(Estes são apenas resumos. Para tabelas, agendas ou "
                   "listas completas, chame abrir_pagina em uma das URLs.)")
     _cache_busca[chave] = resultado
+    salvar_cache()
     return resultado
 
 
@@ -217,7 +242,6 @@ def abrir_pagina(url: str) -> str:
     if not url.startswith(("http://", "https://")):
         return "URL inválida. Forneça um endereço iniciando com http ou https."
 
-    # PASSO 2: Lista de fontes que sabemos que não funcionam bem (exigem JavaScript)
     FONTES_RUINS = [
         "flashscore.", "sofascore.", "cbf.com.br", "espn.com.br",
         "palmeiras.com.br", "flamengo.com.br", "corinthians.com.br",
@@ -254,7 +278,6 @@ def abrir_pagina(url: str) -> str:
     texto = re.sub(r"[ \t\xa0]+", " ", texto)
     texto = re.sub(r"\n\s*\n+", "\n", texto).strip()
 
-    # PASSO 2: Regra dos 1500 caracteres
     if len(texto) < 1500:
         resultado = ("O texto extraído desta página é muito curto ou irrelevante (menos de 1500 caracteres), "
                      "provavelmente porque o site exige JavaScript e o conteúdo principal não carregou. "
@@ -268,6 +291,7 @@ def abrir_pagina(url: str) -> str:
         log.info("   %d caracteres extraídos", len(texto))
 
     _cache_pagina[url] = resultado
+    salvar_cache()
     return resultado
 
 
@@ -481,8 +505,9 @@ class AgentePesquisa:
     def resetar(self) -> None:
         _cache_busca.clear()
         _cache_pagina.clear()
+        salvar_cache()
         self.chat = self._novo_chat()
-        log.info("Contexto e caches reiniciados.")
+        log.info("Contexto e caches reiniciados e salvos.")
 
 
 # ------------------------------------------------------------------------ CLI
