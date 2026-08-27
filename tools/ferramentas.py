@@ -9,16 +9,18 @@ import time
 import json
 import requests
 import pandas as pd
+import urllib.parse
 from fpdf import FPDF
 from bs4 import BeautifulSoup
 
 # --- Imports para Word ---
 from docx import Document
-from docx.shared import Pt as DocxPt, RGBColor as DocxRGBColor
+from docx.shared import Pt as DocxPt, RGBColor as DocxRGBColor, Inches, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH 
 
 # --- Imports para PowerPoint ---
 from pptx import Presentation
-from pptx.util import Inches, Pt as PptxPt
+from pptx.util import Inches as PptxInches, Pt as PptxPt
 from pptx.dml.color import RGBColor as PptxRGBColor
 
 # --- Imports para Excel ---
@@ -92,7 +94,8 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
             if prompt_imagem and prompt_imagem.lower() != "nenhuma":
                 for tentativa in range(3):
                     try:
-                        url_img = f"https://image.pollinations.ai/prompt/{prompt_imagem}?width=800&height=600&nologo=true"
+                        # Para os slides, o formato 800x600 (4:3) funciona melhor
+                        url_img = f"https://image.pollinations.ai/prompt/{prompt_imagem}?width=800&height=600&nologo=true&model=flux"
                         response = requests.get(url_img, timeout=45)
                         if response.status_code == 200:
                             caminho_imagem = f"temp_slide_{i}.jpg"
@@ -103,8 +106,8 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
                         time.sleep(2)
             
             if caminho_imagem:
-                pic = slide.shapes.add_picture(caminho_imagem, Inches(0.5), Inches(2.0), width=Inches(4.5))
-                txBox = slide.shapes.add_textbox(Inches(5.2), Inches(2.0), Inches(4.3), Inches(4.5))
+                pic = slide.shapes.add_picture(caminho_imagem, PptxInches(0.5), PptxInches(2.0), width=PptxInches(4.5))
+                txBox = slide.shapes.add_textbox(PptxInches(5.2), PptxInches(2.0), PptxInches(4.3), PptxInches(4.5))
                 tf = txBox.text_frame
                 tf.word_wrap = True
                 p = tf.add_paragraph()
@@ -113,7 +116,7 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
                 try: os.remove(caminho_imagem)
                 except: pass
             else:
-                txBox = slide.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(8.0), Inches(4.5))
+                txBox = slide.shapes.add_textbox(PptxInches(1.0), PptxInches(2.0), PptxInches(8.0), PptxInches(4.5))
                 tf = txBox.text_frame
                 tf.word_wrap = True
                 p = tf.add_paragraph()
@@ -124,34 +127,131 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
     prs.save(caminho_final)
     return f"Apresentação '{nome_arquivo}' criada com sucesso!"
 
-def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx") -> str:
+def _adicionar_texto_com_negrito(paragrafo, texto):
+    partes = re.split(r'(\*\*.*?\*\*)', texto)
+    for parte in partes:
+        if parte.startswith('**') and parte.endswith('**') and len(parte) > 4:
+            run = paragrafo.add_run(parte[2:-2])
+            run.bold = True
+        else:
+            paragrafo.add_run(parte)
+
+def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx", imagens_para_inserir: list = None) -> str:
     print(f"📝 Gerando documento Word profissional: {nome_arquivo}")
+    
+    texto = re.sub(r'\s*[—–]\s*', ' - ', texto)
+    texto = re.sub(r'\s*-\s*,', ',', texto)
+    texto = re.sub(r'\s*-\s*\.', '.', texto)
+    
     doc = Document()
     linhas = texto.splitlines()
 
-    for linha in linhas:
-        linha = linha.strip()
-        if not linha: continue
+    imagens_colocadas = 0
+    imagens_inseridas_por_tag = []
 
-        match_heading = re.match(r'^(#+)\s+(.*)', linha)
+    for linha in linhas:
+        linha_limpa = linha.strip()
+        if not linha_limpa: continue
+
+        if linha_limpa.replace('-', '') == '' or linha_limpa.replace('*', '') == '':
+            continue
+
+        # == CAÇADOR DE IMAGENS ==
+        match_tag = re.search(r'\[IMAGEM:\s*(.+?)\]', linha_limpa, re.IGNORECASE)
+        match_md = re.search(r'!\[.*?\]\((.+?)\)', linha_limpa)
+        
+        img_path = None
+        if match_tag:
+            img_path = match_tag.group(1).strip()
+        elif match_md:
+            img_path = match_md.group(1).strip()
+            
+        if img_path:
+            if os.path.exists(img_path):
+                print(f"   - Inserindo imagem no meio do texto: {img_path}")
+                p_img = doc.add_paragraph()
+                p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_img.paragraph_format.space_before = DocxPt(12)
+                p_img.paragraph_format.space_after = DocxPt(12)
+                
+                r_img = p_img.add_run()
+                # NOVO: Inserindo em 5.5 polegadas para ter margens perfeitas na folha A4
+                r_img.add_picture(img_path, width=Inches(5.5))
+                
+                imagens_colocadas += 1
+                imagens_inseridas_por_tag.append(img_path)
+            else:
+                print(f"   - Aviso: Imagem '{img_path}' solicitada não foi encontrada.")
+            continue 
+
+        # == PROCESSAMENTO DE TÍTULOS E SUBTÍTULOS ==
+        match_heading = re.match(r'^(#+)\s+(.*)', linha_limpa)
         if match_heading:
             nivel_word = min(len(match_heading.group(1)), 9) 
-            doc.add_heading(match_heading.group(2).replace('**', ''), level=nivel_word)
-        elif re.match(r'^[-*]\s+', linha):
-            doc.add_paragraph(re.sub(r'^[-*]\s+', '', linha).replace('**', ''), style='List Bullet')
-        elif re.match(r'^\d+\.\s+', linha):
-            doc.add_paragraph(linha.replace('**', ''), style='List Number')
-        else:
-            p = doc.add_paragraph(linha.replace('**', ''))
-            for palavra in ['importante:', 'atenção:', 'conclusão:']:
-                if palavra in linha.lower():
-                    p.runs[0].font.bold = True
+            texto_titulo = match_heading.group(2).replace('**', '')
+            h = doc.add_heading(texto_titulo, level=nivel_word)
+            
+            h.paragraph_format.space_before = DocxPt(18)
+            h.paragraph_format.space_after = DocxPt(12)
+            
+            if nivel_word == 1:
+                h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                h.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            continue
+
+        # == PROCESSAMENTO DE LISTAS (Bolinhas) ==
+        if re.match(r'^[-*]\s+', linha_limpa):
+            p = doc.add_paragraph(style='List Bullet')
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY 
+            texto_lista = re.sub(r'^[-*]\s+', '', linha_limpa)
+            _adicionar_texto_com_negrito(p, texto_lista)
+            continue
+
+        # == PROCESSAMENTO DE LISTAS (Números) ==
+        if re.match(r'^\d+\.\s+', linha_limpa):
+            p = doc.add_paragraph(style='List Number')
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            texto_lista = re.sub(r'^\d+\.\s+', '', linha_limpa)
+            _adicionar_texto_com_negrito(p, texto_lista)
+            continue
+
+        # == PROCESSAMENTO DE PARÁGRAFOS NORMAIS ==
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY 
+        p.paragraph_format.first_line_indent = Cm(1.25)
+        _adicionar_texto_com_negrito(p, linha_limpa)
+        
+        for palavra in ['importante:', 'atenção:', 'conclusão:']:
+            if palavra in linha_limpa.lower():
+                if len(p.runs) > 0:
                     p.runs[0].font.color.rgb = DocxRGBColor(200, 0, 0)
-                    break
+                break
+
+    # == PLANO B (FALLBACK) ==
+    if imagens_para_inserir:
+        imagens_faltantes = [img for img in imagens_para_inserir if img not in imagens_inseridas_por_tag]
+        if imagens_faltantes:
+            doc.add_paragraph()
+            h_fallback = doc.add_heading('Anexos e Ilustrações Adicionais', level=1)
+            h_fallback.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+            for img in imagens_faltantes:
+                if os.path.exists(img):
+                    print(f"   - Inserindo imagem via Fallback (Final do Doc): {img}")
+                    p_fallback_img = doc.add_paragraph()
+                    p_fallback_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_fallback_img.paragraph_format.space_before = DocxPt(12)
+                    p_fallback_img.add_run().add_picture(img, width=Inches(5.5))
+                    
+                    p_legenda = doc.add_paragraph(f"Ilustração: {img}")
+                    p_legenda.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    imagens_colocadas += 1
 
     caminho_final = os.path.join(os.getcwd(), nome_arquivo)
     doc.save(caminho_final)
-    return f"Documento Word '{nome_arquivo}' salvo com sucesso!"
+    
+    return f"Documento Word '{nome_arquivo}' salvo com sucesso! {imagens_colocadas} imagens inseridas."
 
 class RelatorioPDF(FPDF):
     def header(self):
@@ -231,11 +331,15 @@ def criar_planilha_excel(dados: list, nome_arquivo: str = "dados.xlsx") -> str:
     return f"Planilha '{nome_arquivo}' gerada com sucesso."
 
 def gerar_imagem(prompt: str, nome_arquivo: str = "imagem_gerada.jpg") -> str:
-    """Gera uma imagem avulsa e salva no computador."""
     print(f"🎨 Gerando imagem: {nome_arquivo}")
     try:
-        url_img = f"https://image.pollinations.ai/prompt/{prompt}?width=1024&height=1024&nologo=true"
+        prompt_turbinado = f"{prompt}, award-winning photography, highly detailed, 8k resolution, ultra-realistic, cinematic lighting"
+        prompt_codificado = urllib.parse.quote(prompt_turbinado)
+        
+        # NOVO: Imagens Widescreen (1024x576) para não quebrar a página do Word!
+        url_img = f"https://image.pollinations.ai/prompt/{prompt_codificado}?width=1024&height=576&nologo=true&model=flux"
         response = requests.get(url_img, timeout=45)
+        
         if response.status_code == 200:
             caminho_final = os.path.join(os.getcwd(), nome_arquivo)
             with open(caminho_final, "wb") as f:
@@ -251,7 +355,6 @@ def gerar_imagem(prompt: str, nome_arquivo: str = "imagem_gerada.jpg") -> str:
 # ==========================================
 
 def ler_arquivo(caminho: str) -> str:
-    """Lê conteúdos de planilhas (xlsx), word (docx), pdfs e txt locais do usuário."""
     print(f"📖 Lendo arquivo: {caminho}")
     if not os.path.exists(caminho):
         return f"Erro: O arquivo '{caminho}' não foi encontrado no sistema."
@@ -284,12 +387,11 @@ def ler_arquivo(caminho: str) -> str:
         return f"Erro ao tentar ler o arquivo: {e}"
 
 def buscar_web(query: str) -> str:
-    """Faz uma busca na internet para encontrar informações atualizadas."""
     print(f"🔍 Buscando na Web: {query}")
     if query in _cache_busca: return _cache_busca[query]
     
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         resultados = DDGS().text(query, max_results=5)
         if not resultados: return "Nenhum resultado encontrado."
         
@@ -298,12 +400,11 @@ def buscar_web(query: str) -> str:
         salvar_cache()
         return texto_resultado
     except ImportError:
-        return "Erro: Instale 'duckduckgo-search' (pip install duckduckgo-search)."
+        return "Erro: Instale a biblioteca ddgs (pip install ddgs)."
     except Exception as e:
         return f"Erro na busca: {e}"
 
 def abrir_pagina(url: str) -> str:
-    """Acessa um site e extrai todo o texto da página."""
     print(f"🌐 Lendo página: {url}")
     if url in _cache_pagina: return _cache_pagina[url]
     
@@ -316,7 +417,7 @@ def abrir_pagina(url: str) -> str:
             script.extract()
             
         texto = soup.get_text(separator=' ', strip=True)
-        texto = texto[:8000] # Limite para não estourar tokens
+        texto = texto[:8000] 
         
         _cache_pagina[url] = texto
         salvar_cache()
@@ -325,7 +426,6 @@ def abrir_pagina(url: str) -> str:
         return f"Erro ao acessar a página: {e}"
 
 def cotacao_moeda(moeda: str) -> str:
-    """Pega a cotação em tempo real. moedas válidas: USD, EUR, BTC."""
     moeda = moeda.upper().strip()
     print(f"💱 Buscando cotação: {moeda}")
     try:
@@ -350,7 +450,6 @@ FERRAMENTAS = {
     "criar_planilha_excel": criar_planilha_excel,
     "gerar_imagem": gerar_imagem,
     
-    # Ferramentas de pesquisa e leitura (que faltavam e causavam o erro)
     "ler_arquivo": ler_arquivo,
     "buscar_web": buscar_web,
     "abrir_pagina": abrir_pagina,

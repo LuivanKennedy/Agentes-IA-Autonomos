@@ -1,6 +1,36 @@
-﻿.venv/
-.env
+﻿# ========================
+# AMBIENTE PYTHON
+# ========================
+.venv/
 __pycache__/
 *.pyc
+
+# ========================
+# SEGURANÇA E BACKUPS
+# ========================
+.env
 main_backup.py
+
+# ========================
+# CACHES DO SISTEMA
+# ========================
 cache_agente.json
+cache_busca.json
+cache_pagina.json
+
+# ========================
+# DOCUMENTOS GERADOS (TESTES)
+# ========================
+*.docx
+*.pdf
+*.xlsx
+*.pptx
+*.csv
+
+# ========================
+# IMAGENS GERADAS
+# ========================
+*.jpg
+*.jpeg
+*.png
+*.webp

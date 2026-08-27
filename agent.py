@@ -20,7 +20,7 @@ def instrucao_com_busca() -> str:
         "Você é um agente autônomo de inteligência, criação e pesquisa. Responda em português do Brasil.\n\n"
         f"DATA E HORA ATUAIS: {contexto_temporal()}.\n\n"
         "FERRAMENTAS DE CRIAÇÃO E AÇÃO:\n"
-        "- criar_documento_word: Use para gerar currículos, cartas, ofícios ou formatar textos desorganizados.\n"
+        "- criar_documento_word: Use para gerar documentos. REGRA OBRIGATÓRIA: Use formatação Markdown (inicie com '#' para Títulos, '##' para Subtítulos e use '**' para palavras em negrito). Para incluir imagens geradas no documento, você DEVE escrever no texto a tag [IMAGEM: nome_do_arquivo.jpg] isolada em uma linha, no local exato onde deseja a imagem.\n"
         "- criar_pdf: Use para gerar relatórios definitivos e limpos.\n"
         "- criar_planilha_excel: Use se o usuário pedir tabelas, planilhas ou organizar dados. Converta os dados em JSON e envie para a ferramenta.\n"
         "- gerar_imagem: Use se o usuário pedir para gerar, criar ou desenhar uma imagem avulsa. Invente um prompt rico em inglês para a ferramenta.\n"
@@ -33,7 +33,8 @@ def instrucao_com_busca() -> str:
         "REGRAS:\n"
         "1. EVITE LOOPS: Faça no máximo 4 tentativas de ferramentas seguidas.\n"
         "2. Se criar um arquivo, avise o usuário onde está e comemore.\n"
-        "3. HONESTIDADE: Nunca invente fatos em pesquisas. Mas seja altamente criativo ao gerar documentos."
+        "3. HONESTIDADE: Nunca invente fatos em pesquisas. Mas seja altamente criativo ao gerar documentos.\n"
+        "4. TOM E ESTRUTURA (ANTI-ROBÔ): Se o usuário pedir um documento 'oficial', 'executivo' ou 'profissional', escreva focando em estrutura de excelência (o sistema já cuidará da ABNT), porém SEMPRE mantenha uma linguagem natural e empática, fugindo do tom robótico. OBRIGATÓRIO: Evite o uso de travessões longos ('—') para intercalar explicações no meio das frases. Use vírgulas ou parênteses, que soam muito mais naturais para humanos. Nunca crie pontuações bizarras como travessão seguido de vírgula ('—,')."
     )
 
 def instrucao_sem_busca() -> str:
@@ -109,7 +110,6 @@ class AgentePesquisa:
                         log.debug("Não foi possível alterar __name__ da ferramenta %s: %s", nome_ferramenta, e)
                     ferramentas_lista.append(func)
         
-        # Desliga o executor automático do SDK para evitar o KeyError
         try:
             config_auto = types.AutomaticFunctionCallingConfig(disable=True)
         except AttributeError:
@@ -120,7 +120,7 @@ class AgentePesquisa:
             config=types.GenerateContentConfig(
                 temperature=self.cfg.temperatura,
                 tools=ferramentas_lista if ferramentas_lista else None,
-                automatic_function_calling=config_auto, # Aplicado aqui
+                automatic_function_calling=config_auto,
                 system_instruction=instrucao_com_busca() if self.busca_ativa else instrucao_sem_busca(),
             ),
         )
@@ -147,7 +147,6 @@ class AgentePesquisa:
             try:
                 resposta = self.chat.send_message(conteudos_para_enviar)
                 
-                # --- INÍCIO DA EXECUÇÃO MANUAL DE FERRAMENTAS ---
                 ciclos = 0
                 while getattr(resposta, "function_calls", None) and ciclos < 10:
                     partes_resposta = []
@@ -185,7 +184,6 @@ class AgentePesquisa:
                     
                     resposta = self.chat.send_message(partes_resposta)
                     ciclos += 1
-                # --- FIM DA EXECUÇÃO MANUAL ---
 
                 self.ultima_chamada = time.monotonic()
                 uso = getattr(resposta, "usage_metadata", None)
