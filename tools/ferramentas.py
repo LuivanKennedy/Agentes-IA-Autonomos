@@ -1,189 +1,358 @@
+"""
+Módulo de Ferramentas - Projeto Agentes IA Autônomos
+Responsável pela geração de documentos, leitura local, buscas na web e APIs.
+"""
+
 import os
 import re
 import time
-import html
 import json
-from datetime import datetime
 import requests
-from ddgs import DDGS
+import pandas as pd
+from fpdf import FPDF
+from bs4 import BeautifulSoup
 
-from config import log, FUSO, DIAS, CABECALHO_HTTP
+# --- Imports para Word ---
+from docx import Document
+from docx.shared import Pt as DocxPt, RGBColor as DocxRGBColor
 
-ARQUIVO_CACHE = "cache_agente.json"
-# Tempo de validade do cache em segundos (86400 segundos = 24 horas)
-TEMPO_EXPIRACAO_SEGUNDOS = 86400
+# --- Imports para PowerPoint ---
+from pptx import Presentation
+from pptx.util import Inches, Pt as PptxPt
+from pptx.dml.color import RGBColor as PptxRGBColor
 
-def carregar_cache() -> dict:
-    if os.path.exists(ARQUIVO_CACHE):
-        try:
-            with open(ARQUIVO_CACHE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"busca": {}, "pagina": {}}
+# --- Imports para Excel ---
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.chart import BarChart, Reference
+from openpyxl.utils.dataframe import dataframe_to_rows
 
-def salvar_cache() -> None:
-    try:
-        with open(ARQUIVO_CACHE, "w", encoding="utf-8") as f:
-            json.dump(_cache_geral, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.warning("Falha ao salvar cache no disco: %s", type(e).__name__)
+# ==========================================
+# 0. SISTEMA DE CACHE E PESQUISA
+# ==========================================
+_cache_busca = {}
+_cache_pagina = {}
 
-def verificar_cache_valido(dicionario_cache: dict, chave: str) -> str:
-    """Verifica se a chave existe no cache e se ainda está dentro da validade."""
-    if chave in dicionario_cache:
-        item = dicionario_cache[chave]
-        if isinstance(item, str):
-            return "" # Força renovação de caches antigos
-            
-        timestamp_salvo = item.get("timestamp", 0)
-        agora = time.time()
-        
-        if (agora - timestamp_salvo) < TEMPO_EXPIRACAO_SEGUNDOS:
-            return item.get("dado", "")
-    return ""
+def carregar_cache():
+    """Carrega os caches do disco, se existirem."""
+    global _cache_busca, _cache_pagina
+    if os.path.exists("cache_busca.json"):
+        with open("cache_busca.json", "r", encoding="utf-8") as f:
+            _cache_busca = json.load(f)
+    if os.path.exists("cache_pagina.json"):
+        with open("cache_pagina.json", "r", encoding="utf-8") as f:
+            _cache_pagina = json.load(f)
 
-def salvar_no_cache_memoria(dicionario_cache: dict, chave: str, valor: str) -> None:
-    """Salva o dado na memória com o timestamp atual."""
-    dicionario_cache[chave] = {
-        "timestamp": time.time(),
-        "dado": valor
-    }
+def salvar_cache():
+    """Salva os caches no disco para persistência entre execuções."""
+    with open("cache_busca.json", "w", encoding="utf-8") as f:
+        json.dump(_cache_busca, f, ensure_ascii=False, indent=2)
+    with open("cache_pagina.json", "w", encoding="utf-8") as f:
+        json.dump(_cache_pagina, f, ensure_ascii=False, indent=2)
 
-_cache_geral = carregar_cache()
-_cache_busca = _cache_geral["busca"]
-_cache_pagina = _cache_geral["pagina"]
-_OPERADORES = re.compile(r'\b(site|filetype|inurl|intitle):\S+', re.IGNORECASE)
+carregar_cache()
 
 
-def hoje() -> str:
-    """Retorna a data e a hora atuais no horário de Brasília."""
-    agora = datetime.now(FUSO)
-    return (f"Agora: {DIAS[agora.weekday()]}, {agora:%d/%m/%Y}, {agora:%H:%M}. "
-            f"Ano corrente: {agora.year}. Mês corrente: {agora.month:02d}.")
+# ==========================================
+# 1. FERRAMENTAS DE CRIAÇÃO (DOCUMENTOS)
+# ==========================================
 
-def buscar_web(consulta: str) -> str:
-    """
-    Ferramenta OBRIGATÓRIA para iniciar pesquisas na web. 
-    RETORNA RESUMOS. Se os resumos forem suficientes para responder a uma pergunta simples, 
-    RESPONDA IMEDIATAMENTE sem abrir os sites.
-    Use 'abrir_pagina' APENAS se a pergunta for complexa ou os resumos não tiverem a resposta exata.
-    """
-    limpa = _OPERADORES.sub("", consulta).replace('"', "").strip()
-    limpa = re.sub(r"\s+", " ", limpa)
-    if limpa != consulta.strip():
-        log.info("   consulta sanitizada (operadores removidos)")
-    if not limpa:
-        return "Consulta vazia após remover operadores. Reformule sem site: ou aspas."
-
-    chave = limpa.lower()
-    dado_cache = verificar_cache_valido(_cache_busca, chave)
-    if dado_cache:
-        log.info("🔍 (cache válido) %s", limpa)
-        return dado_cache
-
-    log.info("🔍 buscando: %s", limpa)
-    achados = []
-    for tentativa in range(3):
-        try:
-            with DDGS(timeout=20) as ddgs:
-                achados = list(ddgs.text(limpa, region="br-pt", max_results=5))
-            if achados:
-                break
-        except Exception as e:
-            if tentativa < 2:
-                time.sleep(1.5 * (tentativa + 1))
-                continue
-            log.warning("   busca falhou: %s", type(e).__name__)
-            return (f"A busca falhou ({type(e).__name__}). Não repita esta "
-                    "consulta; tente termos diferentes ou informe o usuário.")
-
-    if not achados:
-        resultado = "Nenhum resultado. Não repita esta consulta; reformule ou responda com o que já tem."
-        salvar_no_cache_memoria(_cache_busca, chave, resultado)
-        salvar_cache()
-        return resultado
-
-    log.info("   %d resultados", len(achados))
-    resultado = "\n\n".join(
-        f"[{i}] {r.get('title', 'sem título')}\n{r.get('body', '')}\nURL: {r.get('href', '')}"
-        for i, r in enumerate(achados, 1)
-    )
-    # A MENSAGEM ABAIXO FOI ALTERADA PARA REFORÇAR A ESTRATÉGIA DE PESQUISA PROGRESSIVA
-    resultado += ("\n\n(Estes são apenas resumos rápidos. Se a resposta da pergunta do usuário estiver "
-                  "claramente visível acima, RESPONDA AGORA. Se precisar de mais detalhes, tabelas "
-                  "ou textos completos, use a ferramenta abrir_pagina em uma das URLs.)")
+def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apresentacao.pptx") -> str:
+    print(f"🖥️ Montando Apresentação Avançada: {nome_arquivo}")
+    prs = Presentation()
+    slides_dados = dados_apresentacao.get("slides", [])
     
-    salvar_no_cache_memoria(_cache_busca, chave, resultado)
-    salvar_cache()
-    return resultado
+    for i, slide_info in enumerate(slides_dados):
+        titulo = slide_info.get("titulo", f"Slide {i+1}")
+        texto = slide_info.get("texto", "")
+        prompt_imagem = slide_info.get("prompt_imagem", "")
+        
+        print(f"   - Processando slide {i+1}: {titulo}")
+        
+        if i == 0:
+            slide_layout = prs.slide_layouts[0]
+            slide = prs.slides.add_slide(slide_layout)
+            title = slide.shapes.title
+            subtitle = slide.placeholders[1]
+            title.text = titulo
+            title.text_frame.paragraphs[0].font.size = PptxPt(44)
+            title.text_frame.paragraphs[0].font.bold = True
+            title.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 51, 102)
+            subtitle.text = texto
+        else:
+            slide_layout = prs.slide_layouts[5]
+            slide = prs.slides.add_slide(slide_layout)
+            title_shape = slide.shapes.title
+            title_shape.text = titulo
+            title_shape.text_frame.paragraphs[0].font.size = PptxPt(32)
+            title_shape.text_frame.paragraphs[0].font.bold = True
+            title_shape.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 51, 102)
+            
+            caminho_imagem = None
+            if prompt_imagem and prompt_imagem.lower() != "nenhuma":
+                for tentativa in range(3):
+                    try:
+                        url_img = f"https://image.pollinations.ai/prompt/{prompt_imagem}?width=800&height=600&nologo=true"
+                        response = requests.get(url_img, timeout=45)
+                        if response.status_code == 200:
+                            caminho_imagem = f"temp_slide_{i}.jpg"
+                            with open(caminho_imagem, "wb") as f:
+                                f.write(response.content)
+                            break
+                    except:
+                        time.sleep(2)
+            
+            if caminho_imagem:
+                pic = slide.shapes.add_picture(caminho_imagem, Inches(0.5), Inches(2.0), width=Inches(4.5))
+                txBox = slide.shapes.add_textbox(Inches(5.2), Inches(2.0), Inches(4.3), Inches(4.5))
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                p = tf.add_paragraph()
+                p.text = texto
+                p.font.size = PptxPt(18)
+                try: os.remove(caminho_imagem)
+                except: pass
+            else:
+                txBox = slide.shapes.add_textbox(Inches(1.0), Inches(2.0), Inches(8.0), Inches(4.5))
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                p = tf.add_paragraph()
+                p.text = texto
+                p.font.size = PptxPt(20)
+
+    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
+    prs.save(caminho_final)
+    return f"Apresentação '{nome_arquivo}' criada com sucesso!"
+
+def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx") -> str:
+    print(f"📝 Gerando documento Word profissional: {nome_arquivo}")
+    doc = Document()
+    linhas = texto.splitlines()
+
+    for linha in linhas:
+        linha = linha.strip()
+        if not linha: continue
+
+        match_heading = re.match(r'^(#+)\s+(.*)', linha)
+        if match_heading:
+            nivel_word = min(len(match_heading.group(1)), 9) 
+            doc.add_heading(match_heading.group(2).replace('**', ''), level=nivel_word)
+        elif re.match(r'^[-*]\s+', linha):
+            doc.add_paragraph(re.sub(r'^[-*]\s+', '', linha).replace('**', ''), style='List Bullet')
+        elif re.match(r'^\d+\.\s+', linha):
+            doc.add_paragraph(linha.replace('**', ''), style='List Number')
+        else:
+            p = doc.add_paragraph(linha.replace('**', ''))
+            for palavra in ['importante:', 'atenção:', 'conclusão:']:
+                if palavra in linha.lower():
+                    p.runs[0].font.bold = True
+                    p.runs[0].font.color.rgb = DocxRGBColor(200, 0, 0)
+                    break
+
+    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
+    doc.save(caminho_final)
+    return f"Documento Word '{nome_arquivo}' salvo com sucesso!"
+
+class RelatorioPDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.set_text_color(0, 51, 102) 
+        self.cell(0, 10, 'Relatório Gerado por IA Autônoma', 0, 1, 'R')
+        self.line(10, 20, 200, 20) 
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
+
+def criar_pdf(texto: str, nome_arquivo: str = "documento.pdf") -> str:
+    print(f"📄 Gerando PDF executivo: {nome_arquivo}")
+    pdf = RelatorioPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    texto_limpo = texto.replace('**', '').replace('##', '').replace('#', '')
+    for linha in texto_limpo.split('\n'):
+        linha = linha.strip()
+        if not linha:
+            pdf.ln(5)
+            continue
+        if len(linha) < 60 and not linha.endswith('.'):
+            pdf.set_font('Arial', 'B', 14)
+            pdf.set_text_color(0, 51, 102)
+            pdf.cell(0, 10, linha.encode('latin-1', 'replace').decode('latin-1'), ln=True)
+            pdf.ln(2)
+        else:
+            pdf.set_font('Arial', '', 11)
+            pdf.set_text_color(0, 0, 0)
+            pdf.multi_cell(0, 6, linha.encode('latin-1', 'replace').decode('latin-1'))
+
+    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
+    pdf.output(caminho_final)
+    return f"PDF '{nome_arquivo}' criado com sucesso."
+
+def criar_planilha_excel(dados: list, nome_arquivo: str = "dados.xlsx") -> str:
+    print(f"📊 Gerando Excel Inteligente: {nome_arquivo}")
+    if not dados: return "Erro: A lista de dados fornecida está vazia."
+
+    df = pd.DataFrame(dados)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Relatório IA"
+
+    for r in dataframe_to_rows(df, index=False, header=True): ws.append(r)
+
+    cor_fundo = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid') 
+    fonte_branca = Font(bold=True, color='FFFFFF')
+    for cell in ws[1]:
+        cell.fill = cor_fundo
+        cell.font = fonte_branca
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+    for col in ws.columns:
+        tamanho_max = max((len(str(c.value)) for c in col if c.value), default=10)
+        ws.column_dimensions[col[0].column_letter].width = tamanho_max + 2
+
+    try:
+        chart = BarChart()
+        chart.type = "col"
+        chart.style = 10
+        chart.title = "Análise de Dados"
+        chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=len(df)+1, max_col=2), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=len(df)+1))
+        ws.add_chart(chart, f"{chr(65 + len(df.columns) + 1)}2")
+    except Exception as e:
+        print(f"      ⚠️ Sem gráfico: {e}")
+
+    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
+    wb.save(caminho_final)
+    return f"Planilha '{nome_arquivo}' gerada com sucesso."
+
+def gerar_imagem(prompt: str, nome_arquivo: str = "imagem_gerada.jpg") -> str:
+    """Gera uma imagem avulsa e salva no computador."""
+    print(f"🎨 Gerando imagem: {nome_arquivo}")
+    try:
+        url_img = f"https://image.pollinations.ai/prompt/{prompt}?width=1024&height=1024&nologo=true"
+        response = requests.get(url_img, timeout=45)
+        if response.status_code == 200:
+            caminho_final = os.path.join(os.getcwd(), nome_arquivo)
+            with open(caminho_final, "wb") as f:
+                f.write(response.content)
+            return f"Imagem gerada e salva com sucesso em: {caminho_final}"
+        return "Erro: Falha no servidor de imagens."
+    except Exception as e:
+        return f"Erro ao gerar imagem: {e}"
+
+
+# ==========================================
+# 2. FERRAMENTAS DE PESQUISA E LEITURA (CRÍTICAS)
+# ==========================================
+
+def ler_arquivo(caminho: str) -> str:
+    """Lê conteúdos de planilhas (xlsx), word (docx), pdfs e txt locais do usuário."""
+    print(f"📖 Lendo arquivo: {caminho}")
+    if not os.path.exists(caminho):
+        return f"Erro: O arquivo '{caminho}' não foi encontrado no sistema."
+    
+    ext = caminho.split('.')[-1].lower()
+    try:
+        if ext == 'txt' or ext == 'csv':
+            with open(caminho, 'r', encoding='utf-8') as f:
+                return f.read()
+                
+        elif ext == 'xlsx' or ext == 'xls':
+            df = pd.read_excel(caminho)
+            return f"Conteúdo da Planilha Excel:\n{df.to_string()}"
+            
+        elif ext == 'docx':
+            doc = Document(caminho)
+            return "\n".join([p.text for p in doc.paragraphs])
+            
+        elif ext == 'pdf':
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(caminho)
+                texto = "\n".join([p.extract_text() for p in reader.pages if p.extract_text()])
+                return texto if texto else "O PDF não contém texto legível."
+            except ImportError:
+                return "Erro interno: A biblioteca 'PyPDF2' não está instalada. Execute 'pip install PyPDF2'."
+        else:
+            return f"Formato de arquivo '.{ext}' não suportado para leitura direta."
+    except Exception as e:
+        return f"Erro ao tentar ler o arquivo: {e}"
+
+def buscar_web(query: str) -> str:
+    """Faz uma busca na internet para encontrar informações atualizadas."""
+    print(f"🔍 Buscando na Web: {query}")
+    if query in _cache_busca: return _cache_busca[query]
+    
+    try:
+        from duckduckgo_search import DDGS
+        resultados = DDGS().text(query, max_results=5)
+        if not resultados: return "Nenhum resultado encontrado."
+        
+        texto_resultado = "\n".join([f"Título: {r['title']}\nLink: {r['href']}\nResumo: {r['body']}\n" for r in resultados])
+        _cache_busca[query] = texto_resultado
+        salvar_cache()
+        return texto_resultado
+    except ImportError:
+        return "Erro: Instale 'duckduckgo-search' (pip install duckduckgo-search)."
+    except Exception as e:
+        return f"Erro na busca: {e}"
 
 def abrir_pagina(url: str) -> str:
-    """Baixa uma página web renderizando JavaScript através da API Jina Reader."""
-    url = url.strip().strip('<>"\'')
-    if not url.startswith(("http://", "https://")):
-        return "URL inválida. Forneça um endereço iniciando com http ou https."
-
-    FONTES_RUINS = [
-        "flashscore.", "sofascore.", "cbf.com.br", "espn.com.br",
-        "palmeiras.com.br", "flamengo.com.br", "corinthians.com.br",
-        "saopaulofc.net", "globoesporte.globo.com/tempo-real"
-    ]
-    
-    if any(ruim in url.lower() for ruim in FONTES_RUINS):
-        log.warning("   url ignorada (fonte ruim conhecida): %s", url[:70])
-        return ("Este site bloqueia acessos automatizados. IGNORE este site e TENTE A PRÓXIMA URL.")
-
-    dado_cache = verificar_cache_valido(_cache_pagina, url)
-    if dado_cache:
-        log.info("📄 (cache válido) %s", url[:70])
-        return dado_cache
-
-    log.info("📄 abrindo (com Jina AI): %s", url[:70])
-    
-    url_jina = f"https://r.jina.ai/{url}"
-    headers = {"Accept": "text/markdown"}
+    """Acessa um site e extrai todo o texto da página."""
+    print(f"🌐 Lendo página: {url}")
+    if url in _cache_pagina: return _cache_pagina[url]
     
     try:
-        r = requests.get(url_jina, headers=headers, timeout=25)
-        r.raise_for_status()
-        texto = r.text
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resposta = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resposta.text, 'html.parser')
+        
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.extract()
+            
+        texto = soup.get_text(separator=' ', strip=True)
+        texto = texto[:8000] # Limite para não estourar tokens
+        
+        _cache_pagina[url] = texto
+        salvar_cache()
+        return texto
     except Exception as e:
-        log.warning("   falha ao abrir com Jina: %s", type(e).__name__)
-        return f"Não foi possível abrir a página ({type(e).__name__}). Tente outra URL."
+        return f"Erro ao acessar a página: {e}"
 
-    if not texto or len(texto.strip()) < 150:
-        resultado = "O texto retornado é muito curto (conteúdo vazio). IGNORE este site e tente a PRÓXIMA fonte."
-        log.info("   texto muito curto ou vazio (%d chars).", len(texto if texto else ""))
-    else:
-        resultado = texto
-        log.info("   %d caracteres extraídos e enviados na íntegra", len(texto))
-
-    salvar_no_cache_memoria(_cache_pagina, url, resultado)
-    salvar_cache()
-    return resultado
-
-def cotacao_moeda(par: str) -> str:
-    """Consulta a cotação atual de moedas e criptomoedas."""
-    par = par.upper().strip().replace("/", "-").replace("_", "-")
-    if "-" not in par:
-        par = f"{par}-BRL"
-
-    log.info("💱 cotação: %s", par)
+def cotacao_moeda(moeda: str) -> str:
+    """Pega a cotação em tempo real. moedas válidas: USD, EUR, BTC."""
+    moeda = moeda.upper().strip()
+    print(f"💱 Buscando cotação: {moeda}")
     try:
-        r = requests.get(f"https://economia.awesomeapi.com.br/json/last/{par}", timeout=15)
-        r.raise_for_status()
-        d = next(iter(r.json().values()))
+        url = f"https://economia.awesomeapi.com.br/last/{moeda}-BRL"
+        req = requests.get(url)
+        dados = req.json()
+        chave = f"{moeda}BRL"
+        valor = dados[chave]["bid"]
+        data = dados[chave]["create_date"]
+        return f"Cotação {moeda}/BRL: R$ {valor} (Atualizado em: {data})"
     except Exception as e:
-        log.warning("   cotação falhou: %s", type(e).__name__)
-        return f"Não foi possível obter a cotação ({type(e).__name__})."
+        return f"Erro ao buscar cotação. Verifique se a moeda é válida (USD, EUR, BTC). Erro: {e}"
 
-    log.info("   %s = %s", par, d.get("bid"))
-    return (
-        f"{d.get('name', par)}\nCompra: {d.get('bid')}\nVenda: {d.get('ask')}\n"
-        f"Variação no dia: {d.get('pctChange')}%\nMáxima: {d.get('high')} | Mínima: {d.get('low')}\n"
-        f"Atualizado em: {d.get('create_date')}\nFonte: AwesomeAPI"
-    )
 
-FERRAMENTAS = [hoje, buscar_web, abrir_pagina, cotacao_moeda]
+# ==========================================
+# 3. REGISTRO GERAL NO DICIONÁRIO
+# ==========================================
+FERRAMENTAS = {
+    "criar_apresentacao_com_ia": criar_apresentacao_com_ia,
+    "criar_documento_word": criar_documento_word,
+    "criar_pdf": criar_pdf,
+    "criar_planilha_excel": criar_planilha_excel,
+    "gerar_imagem": gerar_imagem,
     
+    # Ferramentas de pesquisa e leitura (que faltavam e causavam o erro)
+    "ler_arquivo": ler_arquivo,
+    "buscar_web": buscar_web,
+    "abrir_pagina": abrir_pagina,
+    "cotacao_moeda": cotacao_moeda
+}

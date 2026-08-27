@@ -1,6 +1,8 @@
 import sys
 import time
 import random
+import os
+import re
 from datetime import datetime
 from google import genai
 from google.genai import types
@@ -15,37 +17,41 @@ def contexto_temporal() -> str:
 
 def instrucao_com_busca() -> str:
     return (
-        "Você é um agente de pesquisa objetivo. Responda em português do Brasil.\n\n"
+        "Você é um agente autônomo de inteligência, criação e pesquisa. Responda em português do Brasil.\n\n"
         f"DATA E HORA ATUAIS: {contexto_temporal()}.\n\n"
-        "FERRAMENTAS (ESTRATÉGIA PROGRESSIVA):\n"
-        "- hoje: confirme a data antes de raciocínio temporal.\n"
-        "- cotacao_moeda: use SEMPRE para dólar, euro, bitcoin. Não use buscar_web para isso.\n"
-        "- buscar_web: OBRIGATÓRIA para iniciar pesquisas. Ela retorna RESUMOS rápidos. "
-        "Se a pergunta for SIMPLES (ex: idade, capital, placar final) e a resposta estiver "
-        "nos resumos, RESPONDA IMEDIATAMENTE. Não use outras ferramentas.\n"
-        "- abrir_pagina: use APENAS se a pergunta for COMPLEXA (ex: calendários, tabelas completas, "
-        "escalações detalhadas) ou se os resumos do buscar_web forem insuficientes.\n\n"
-        "REGRAS DE COMPORTAMENTO (MUITO IMPORTANTE):\n"
-        "1. EVITE LOOPS: Faça no MÁXIMO 4 ou 5 tentativas de busca ou abrir página por pergunta.\n"
-        "2. Se não encontrar a resposta exata após algumas tentativas, PARE IMEDIATAMENTE de usar ferramentas.\n"
-        "3. Responda com as informações que conseguiu reunir até o momento ou admita claramente que a informação não está disponível/acessível.\n\n"
-        "HONESTIDADE: Cite os links usados. Nunca invente dados."
+        "FERRAMENTAS DE CRIAÇÃO E AÇÃO:\n"
+        "- criar_documento_word: Use para gerar currículos, cartas, ofícios ou formatar textos desorganizados.\n"
+        "- criar_pdf: Use para gerar relatórios definitivos e limpos.\n"
+        "- criar_planilha_excel: Use se o usuário pedir tabelas, planilhas ou organizar dados. Converta os dados em JSON e envie para a ferramenta.\n"
+        "- gerar_imagem: Use se o usuário pedir para gerar, criar ou desenhar uma imagem avulsa. Invente um prompt rico em inglês para a ferramenta.\n"
+        "- criar_apresentacao_com_ia: OBRIGATÓRIO quando o usuário pedir PPT/apresentações. Você deve planejar o roteiro, inventar prompts de imagem (em inglês) para cada slide, formatar um JSON estrito (sem erros de aspas) e chamar a ferramenta.\n\n"
+        "FERRAMENTAS DE PESQUISA (ESTRATÉGIA PROGRESSIVA):\n"
+        "- ler_arquivo: Extrai dados de documentos locais do usuário (.txt, .pdf, .xlsx, .pptx, imagens).\n"
+        "- cotacao_moeda: use SEMPRE para dólar, euro, bitcoin.\n"
+        "- buscar_web: OBRIGATÓRIA para iniciar pesquisas de internet. Se os resumos forem suficientes, RESPONDA.\n"
+        "- abrir_pagina: Use para aprofundar se a busca for superficial.\n\n"
+        "REGRAS:\n"
+        "1. EVITE LOOPS: Faça no máximo 4 tentativas de ferramentas seguidas.\n"
+        "2. Se criar um arquivo, avise o usuário onde está e comemore.\n"
+        "3. HONESTIDADE: Nunca invente fatos em pesquisas. Mas seja altamente criativo ao gerar documentos."
     )
 
 def instrucao_sem_busca() -> str:
     return (
-        "Você é um agente de pesquisa. Responda em português. "
+        "Você é um agente autônomo. Responda em português. "
         f"Data atual: {contexto_temporal()}. "
-        "Você NÃO tem acesso à internet nesta sessão. Não invente dados."
+        "Você NÃO tem acesso à internet nesta sessão. Não invente dados de pesquisa, mas pode criar documentos livremente."
     )
 
-def classificar_429(erro: Exception) -> tuple[str, bool]:
+def classificar_erro_api(erro: Exception) -> tuple[str, bool]:
     texto = str(erro)
-    if "per_minute" in texto: return ("RPM", True)
-    if "input_token" in texto: return ("TPM", True)
-    if "per_day" in texto: return ("RPD", False)
-    if "QuotaFailure" in texto or "retryDelay" in texto: return ("cota transitória", True)
-    return ("COTA DE PROJETO", False)
+    if "per_minute" in texto: return ("Limites por Minuto", True)
+    if "input_token" in texto: return ("Limite de Tokens", True)
+    if "per_day" in texto: return ("Limite Diário Excedido", False)
+    if "QuotaFailure" in texto or "retryDelay" in texto: return ("Cota Transitória", True)
+    if "503" in texto or "high demand" in texto.lower() or "unavailable" in texto.lower():
+        return ("Servidor Congestionado (503)", True)
+    return ("Erro Desconhecido / Cota de Projeto", False)
 
 def calcular_pausa(erro: Exception, tentativa: int, base: float) -> float:
     texto = str(erro)
@@ -55,7 +61,7 @@ def calcular_pausa(erro: Exception, tentativa: int, base: float) -> float:
             digitos = "".join(c for c in trecho if c.isdigit())
             if digitos: return float(digitos[:3]) + random.uniform(0, 2)
         except (IndexError, ValueError): pass
-    return base * (2 ** (tentativa - 1)) + random.uniform(0, 3)
+    return base * (2 ** (tentativa - 1)) + random.uniform(2, 5)
 
 def dormir(segundos: float) -> bool:
     try:
@@ -65,7 +71,7 @@ def dormir(segundos: float) -> bool:
             if resta <= 0: return True
             time.sleep(min(0.5, resta))
     except KeyboardInterrupt:
-        log.warning("Espera cancelada.")
+        log.warning("Espera cancelada pelo usuário.")
         return False
 
 class AgentePesquisa:
@@ -93,51 +99,127 @@ class AgentePesquisa:
         sys.exit(1)
 
     def _novo_chat(self):
+        ferramentas_lista = []
+        if self.busca_ativa and FERRAMENTAS:
+            for nome_ferramenta, func in FERRAMENTAS.items():
+                if callable(func):
+                    try:
+                        func.__name__ = nome_ferramenta
+                    except Exception as e:
+                        log.debug("Não foi possível alterar __name__ da ferramenta %s: %s", nome_ferramenta, e)
+                    ferramentas_lista.append(func)
+        
+        # Desliga o executor automático do SDK para evitar o KeyError
+        try:
+            config_auto = types.AutomaticFunctionCallingConfig(disable=True)
+        except AttributeError:
+            config_auto = {"disable": True}
+            
         return self.cliente.chats.create(
             model=self.modelo_atual,
             config=types.GenerateContentConfig(
                 temperature=self.cfg.temperatura,
-                tools=FERRAMENTAS if self.busca_ativa else None,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=False,
-                    maximum_remote_calls=10  # Aumentamos o limite de ferramentas por turno!
-                ) if self.busca_ativa else None,
+                tools=ferramentas_lista if ferramentas_lista else None,
+                automatic_function_calling=config_auto, # Aplicado aqui
                 system_instruction=instrucao_com_busca() if self.busca_ativa else instrucao_sem_busca(),
             ),
         )
 
     def perguntar(self, pergunta: str) -> str | None:
+        padrao_midia = re.compile(r'([a-zA-Z0-9_.\-\\/:]+\.(?:jpg|jpeg|png|webp|heic|mp3|wav|ogg|mp4|avi|mov))', re.IGNORECASE)
+        possiveis_arquivos = list(set(padrao_midia.findall(pergunta)))
+        
+        conteudos_para_enviar = [pergunta]
+        
+        for caminho in possiveis_arquivos:
+            if os.path.exists(caminho):
+                log.info("👁️ Preparando mídia (upload) para o agente: %s", caminho)
+                try:
+                    arquivo_upado = self.cliente.files.upload(file=caminho)
+                    conteudos_para_enviar.append(arquivo_upado)
+                except Exception as e:
+                    log.warning("Falha ao preparar mídia %s: %s", caminho, type(e).__name__)
+
         for tentativa in range(1, self.cfg.max_tentativas + 1):
             espera = self.cfg.intervalo_min - (time.monotonic() - self.ultima_chamada)
             if espera > 0 and not dormir(espera): return None
 
             try:
-                resposta = self.chat.send_message(pergunta)
+                resposta = self.chat.send_message(conteudos_para_enviar)
+                
+                # --- INÍCIO DA EXECUÇÃO MANUAL DE FERRAMENTAS ---
+                ciclos = 0
+                while getattr(resposta, "function_calls", None) and ciclos < 10:
+                    partes_resposta = []
+                    
+                    for fc in resposta.function_calls:
+                        nome_ferramenta = fc.name
+                        argumentos = fc.args or {}
+                        log.info("⚙️  Agente acionou ferramenta: %s", nome_ferramenta)
+                        
+                        if nome_ferramenta in FERRAMENTAS:
+                            func = FERRAMENTAS[nome_ferramenta]
+                            if callable(func):
+                                try:
+                                    resultado = func(**argumentos)
+                                    if not isinstance(resultado, dict):
+                                        resultado = {"resultado": str(resultado)}
+                                except Exception as err_func:
+                                    log.error("Erro interno na ferramenta %s: %s", nome_ferramenta, err_func)
+                                    resultado = {"erro": str(err_func)}
+                            else:
+                                erro_msg = f"A ferramenta '{nome_ferramenta}' não é uma função válida."
+                                log.error(erro_msg)
+                                resultado = {"erro": erro_msg}
+                        else:
+                            erro_msg = f"Ferramenta '{nome_ferramenta}' desconhecida."
+                            log.error(erro_msg)
+                            resultado = {"erro": erro_msg}
+                            
+                        partes_resposta.append(
+                            types.Part.from_function_response(
+                                name=nome_ferramenta,
+                                response=resultado
+                            )
+                        )
+                    
+                    resposta = self.chat.send_message(partes_resposta)
+                    ciclos += 1
+                # --- FIM DA EXECUÇÃO MANUAL ---
+
                 self.ultima_chamada = time.monotonic()
                 uso = getattr(resposta, "usage_metadata", None)
                 if uso:
                     log.info("Tokens → in:%s out:%s total:%s",
                              uso.prompt_token_count, uso.candidates_token_count, uso.total_token_count)
                 
-                # Pegamos o texto. Se vier vazio, garantimos que não deu erro por causa das ferramentas.
                 texto_final = (resposta.text or "").strip()
                 
-                # Rede de segurança: avisa o usuário caso o agente atinja o limite antes de responder
                 if not texto_final and getattr(resposta, "function_calls", None):
-                    return "⚠️ Fiz várias pesquisas, mas atingi o limite de ações automáticas antes de concluir a resposta. Tente perguntar de forma mais específica!"
+                    return "⚠️ O agente fez várias ações, mas não conseguiu gerar um texto final. Seja mais específico!"
                 
                 return texto_final
 
             except genai_errors.ClientError as e:
                 self.ultima_chamada = time.monotonic()
-                if getattr(e, "code", None) != 429: return None
-                descricao, repetir = classificar_429(e)
-                log.warning("429 (%d/%d) → %s", tentativa, self.cfg.max_tentativas, descricao)
-                if not repetir or tentativa == self.cfg.max_tentativas: return None
+                codigo_erro = getattr(e, "code", None)
+                
+                if codigo_erro not in (429, 503): 
+                    log.error("Falha na API: %s", e)
+                    return None
+                
+                descricao, repetir = classificar_erro_api(e)
+                log.warning("Erro API %s (%d/%d) → %s. Tentando novamente em breve...", codigo_erro, tentativa, self.cfg.max_tentativas, descricao)
+                
+                if not repetir or tentativa == self.cfg.max_tentativas: 
+                    return "A API do Google está indisponível no momento devido à alta demanda. Por favor, aguarde alguns minutos."
+                
                 if not dormir(calcular_pausa(e, tentativa, self.cfg.backoff_base)): return None
+                
             except Exception as e:
-                log.error("Falha inesperada: %s", e)
+                log.error("Falha inesperada: %s", repr(e)) 
                 return None
+                
         return None
 
     def resetar(self) -> None:
