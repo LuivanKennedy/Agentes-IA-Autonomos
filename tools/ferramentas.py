@@ -30,20 +30,31 @@ from openpyxl.chart import BarChart, Reference
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # ==========================================
-# 0. SISTEMA DE CACHE E PESQUISA
+# 0. SISTEMA DE CACHE E PESQUISA (COM VALIDADE DE 24H)
 # ==========================================
 _cache_busca = {}
 _cache_pagina = {}
 
 def carregar_cache():
-    """Carrega os caches do disco, se existirem."""
+    """Carrega os caches do disco. Se tiverem mais de 24h, são apagados."""
     global _cache_busca, _cache_pagina
-    if os.path.exists("cache_busca.json"):
-        with open("cache_busca.json", "r", encoding="utf-8") as f:
-            _cache_busca = json.load(f)
-    if os.path.exists("cache_pagina.json"):
-        with open("cache_pagina.json", "r", encoding="utf-8") as f:
-            _cache_pagina = json.load(f)
+    agora = time.time()
+    
+    def ler_arquivo_cache(nome_arquivo):
+        if os.path.exists(nome_arquivo):
+            # Calcula a idade do arquivo em segundos (86400 seg = 24 horas)
+            idade_arquivo = agora - os.path.getmtime(nome_arquivo)
+            if idade_arquivo > 86400:
+                print(f"🧹 Limpando cache antigo (mais de 24h): {nome_arquivo}")
+                os.remove(nome_arquivo)
+                return {} # Retorna vazio para a IA buscar dados frescos
+            
+            with open(nome_arquivo, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    _cache_busca = ler_arquivo_cache("cache_busca.json")
+    _cache_pagina = ler_arquivo_cache("cache_pagina.json")
 
 def salvar_cache():
     """Salva os caches no disco para persistência entre execuções."""
