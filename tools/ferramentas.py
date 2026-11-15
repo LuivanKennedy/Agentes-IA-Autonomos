@@ -3,11 +3,12 @@ Módulo de Ferramentas - Projeto Agentes IA Autônomos
 Responsável pela geração de documentos, leitura local, buscas na web e APIs.
 
 Destaques desta versão:
-- Excel em MODO DINÂMICO: projeção 100% por fórmulas nativas (FV) ligadas à aba 'Premissas'.
+- Excel em MODO DINÂMICO: projeção 100% por fórmulas nativas ligadas à aba 'Premissas'.
 - 3 cenários (pessimista / base / otimista) + benchmark CDI no mesmo gráfico.
-- Formatação condicional na carteira (ícones de tendência, barras de dados, escala de cores).
-- Dupla compatibilidade: as fórmulas são gravadas junto com seus VALORES em cache,
-  permitindo leitura por pandas/openpyxl sem precisar abrir o Excel.
+- Aporte mensal opcionalmente corrigido pela inflação (B7) e IR sobre o ganho (B16).
+- Formatação condicional na carteira (ícones, barras de dados, escala de cores).
+- Fórmulas gravadas junto com seus VALORES em cache (leitura por pandas/openpyxl).
+- Cotações reais da B3 via brapi.dev com fallback para yfinance.
 """
 
 import os
@@ -16,10 +17,18 @@ import time
 import json
 import shutil
 import zipfile
+import unicodedata
 import requests
+import yfinance as yf
+from dotenv import load_dotenv
+
+load_dotenv()
+BRAPI_TOKEN = os.getenv("BRAPI_TOKEN")
+
 import pandas as pd
 import urllib.parse
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from fpdf import FPDF
 from bs4 import BeautifulSoup
 
@@ -58,8 +67,7 @@ def carregar_cache():
 
     def ler_arquivo_cache(nome_arquivo):
         if os.path.exists(nome_arquivo):
-            idade_arquivo = agora - os.path.getmtime(nome_arquivo)  # 86400 = 24h
-            if idade_arquivo > 86400:
+            if agora - os.path.getmtime(nome_arquivo) > 86400:
                 print(f"🧹 Limpando cache antigo (mais de 24h): {nome_arquivo}")
                 os.remove(nome_arquivo)
                 return {}
@@ -98,7 +106,6 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
         titulo = slide_info.get("titulo", f"Slide {i+1}")
         texto = slide_info.get("texto", "")
         prompt_imagem = slide_info.get("prompt_imagem", "")
-
         print(f"   - Processando slide {i+1}: {titulo}")
 
         if i == 0:
@@ -110,52 +117,51 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
             title.text_frame.paragraphs[0].font.bold = True
             title.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 51, 102)
             subtitle.text = texto
-        else:
-            slide = prs.slides.add_slide(prs.slide_layouts[5])
-            title_shape = slide.shapes.title
-            title_shape.text = titulo
-            title_shape.text_frame.paragraphs[0].font.size = PptxPt(32)
-            title_shape.text_frame.paragraphs[0].font.bold = True
-            title_shape.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 51, 102)
+            continue
 
-            caminho_imagem = None
-            if prompt_imagem and prompt_imagem.lower() != "nenhuma":
-                for _ in range(3):
-                    try:
-                        prompt_cod = urllib.parse.quote(prompt_imagem)
-                        url_img = (f"https://image.pollinations.ai/prompt/{prompt_cod}"
-                                   f"?width=800&height=600&nologo=true&model=flux")
-                        response = requests.get(url_img, timeout=45)
-                        if response.status_code == 200:
-                            caminho_imagem = f"temp_slide_{i}.jpg"
-                            with open(caminho_imagem, "wb") as f:
-                                f.write(response.content)
-                            break
-                    except Exception:
-                        time.sleep(2)
+        slide = prs.slides.add_slide(prs.slide_layouts[5])
+        title_shape = slide.shapes.title
+        title_shape.text = titulo
+        title_shape.text_frame.paragraphs[0].font.size = PptxPt(32)
+        title_shape.text_frame.paragraphs[0].font.bold = True
+        title_shape.text_frame.paragraphs[0].font.color.rgb = PptxRGBColor(0, 51, 102)
 
-            if caminho_imagem:
-                slide.shapes.add_picture(caminho_imagem, PptxInches(0.5), PptxInches(2.0),
-                                         width=PptxInches(4.5))
-                txBox = slide.shapes.add_textbox(PptxInches(5.2), PptxInches(2.0),
-                                                 PptxInches(4.3), PptxInches(4.5))
-                tf = txBox.text_frame
-                tf.word_wrap = True
-                p = tf.add_paragraph()
-                p.text = texto
-                p.font.size = PptxPt(18)
+        caminho_imagem = None
+        if prompt_imagem and prompt_imagem.lower() != "nenhuma":
+            for _ in range(3):
                 try:
-                    os.remove(caminho_imagem)
+                    prompt_cod = urllib.parse.quote(prompt_imagem)
+                    url_img = (f"https://image.pollinations.ai/prompt/{prompt_cod}"
+                               f"?width=800&height=600&nologo=true&model=flux")
+                    response = requests.get(url_img, timeout=45)
+                    if response.status_code == 200:
+                        caminho_imagem = f"temp_slide_{i}.jpg"
+                        with open(caminho_imagem, "wb") as f:
+                            f.write(response.content)
+                        break
                 except Exception:
-                    pass
-            else:
-                txBox = slide.shapes.add_textbox(PptxInches(1.0), PptxInches(2.0),
-                                                 PptxInches(8.0), PptxInches(4.5))
-                tf = txBox.text_frame
-                tf.word_wrap = True
-                p = tf.add_paragraph()
-                p.text = texto
-                p.font.size = PptxPt(20)
+                    time.sleep(2)
+
+        if caminho_imagem:
+            slide.shapes.add_picture(caminho_imagem, PptxInches(0.5), PptxInches(2.0),
+                                     width=PptxInches(4.5))
+            txBox = slide.shapes.add_textbox(PptxInches(5.2), PptxInches(2.0),
+                                             PptxInches(4.3), PptxInches(4.5))
+            tamanho = 18
+        else:
+            txBox = slide.shapes.add_textbox(PptxInches(1.0), PptxInches(2.0),
+                                             PptxInches(8.0), PptxInches(4.5))
+            tamanho = 20
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.add_paragraph()
+        p.text = texto
+        p.font.size = PptxPt(tamanho)
+        if caminho_imagem:
+            try:
+                os.remove(caminho_imagem)
+            except Exception:
+                pass
 
     caminho_final = os.path.join(os.getcwd(), nome_arquivo)
     prs.save(caminho_final)
@@ -163,11 +169,9 @@ def criar_apresentacao_com_ia(dados_apresentacao: dict, nome_arquivo: str = "apr
 
 
 def _adicionar_texto_com_negrito(paragrafo, texto):
-    partes = re.split(r'(\*\*.*?\*\*)', texto)
-    for parte in partes:
+    for parte in re.split(r'(\*\*.*?\*\*)', texto):
         if parte.startswith('**') and parte.endswith('**') and len(parte) > 4:
-            run = paragrafo.add_run(parte[2:-2])
-            run.bold = True
+            paragrafo.add_run(parte[2:-2]).bold = True
         else:
             paragrafo.add_run(parte)
 
@@ -182,12 +186,10 @@ def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx",
     texto = re.sub(r'\s*-\s*\.', '.', texto)
 
     doc = Document()
-    linhas = texto.splitlines()
-
     imagens_colocadas = 0
     imagens_inseridas_por_tag = []
 
-    for linha in linhas:
+    for linha in texto.splitlines():
         linha_limpa = linha.strip()
         if not linha_limpa:
             continue
@@ -197,12 +199,8 @@ def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx",
         # == CAÇADOR DE IMAGENS ==
         match_tag = re.search(r'\[IMAGEM:\s*(.+?)\]', linha_limpa, re.IGNORECASE)
         match_md = re.search(r'!\[.*?\]\((.+?)\)', linha_limpa)
-
-        img_path = None
-        if match_tag:
-            img_path = match_tag.group(1).strip()
-        elif match_md:
-            img_path = match_md.group(1).strip()
+        img_path = (match_tag.group(1).strip() if match_tag
+                    else match_md.group(1).strip() if match_md else None)
 
         if img_path:
             if os.path.exists(img_path):
@@ -218,64 +216,56 @@ def criar_documento_word(texto: str, nome_arquivo: str = "relatorio.docx",
                 print(f"   - Aviso: Imagem '{img_path}' solicitada não foi encontrada.")
             continue
 
-        # == TÍTULOS E SUBTÍTULOS ==
+        # == TÍTULOS ==
         match_heading = re.match(r'^(#+)\s+(.*)', linha_limpa)
         if match_heading:
             nivel_word = min(len(match_heading.group(1)), 9)
-            texto_titulo = match_heading.group(2).replace('**', '')
-            h = doc.add_heading(texto_titulo, level=nivel_word)
+            h = doc.add_heading(match_heading.group(2).replace('**', ''), level=nivel_word)
             h.paragraph_format.space_before = DocxPt(18)
             h.paragraph_format.space_after = DocxPt(12)
             h.alignment = WD_ALIGN_PARAGRAPH.CENTER if nivel_word == 1 else WD_ALIGN_PARAGRAPH.JUSTIFY
             continue
 
-        # == LISTAS (Bolinhas) ==
+        # == LISTAS ==
         if re.match(r'^[-*•]\s+', linha_limpa):
             p = doc.add_paragraph(style='List Bullet')
             p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             _adicionar_texto_com_negrito(p, re.sub(r'^[-*•]\s+', '', linha_limpa))
             continue
-
-        # == LISTAS (Números) ==
         if re.match(r'^\d+\.\s+', linha_limpa):
             p = doc.add_paragraph(style='List Number')
             p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             _adicionar_texto_com_negrito(p, re.sub(r'^\d+\.\s+', '', linha_limpa))
             continue
 
-        # == PARÁGRAFOS NORMAIS ==
+        # == PARÁGRAFOS ==
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         p.paragraph_format.first_line_indent = Cm(1.25)
         _adicionar_texto_com_negrito(p, linha_limpa)
-
         for palavra in ['importante:', 'atenção:', 'conclusão:']:
             if palavra in linha_limpa.lower():
-                if len(p.runs) > 0:
+                if p.runs:
                     p.runs[0].font.color.rgb = DocxRGBColor(200, 0, 0)
                 break
 
-    # == PLANO B (FALLBACK DE IMAGENS) ==
+    # == FALLBACK DE IMAGENS ==
     if imagens_para_inserir:
-        imagens_faltantes = [img for img in imagens_para_inserir if img not in imagens_inseridas_por_tag]
-        if imagens_faltantes:
+        faltantes = [img for img in imagens_para_inserir if img not in imagens_inseridas_por_tag]
+        if faltantes:
             doc.add_paragraph()
-            h_fallback = doc.add_heading('Anexos e Ilustrações Adicionais', level=1)
-            h_fallback.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-            for img in imagens_faltantes:
+            doc.add_heading('Anexos e Ilustrações Adicionais', level=1).alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for img in faltantes:
                 if os.path.exists(img):
                     print(f"   - Inserindo imagem via Fallback (Final do Doc): {img}")
                     p_fb = doc.add_paragraph()
                     p_fb.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     p_fb.paragraph_format.space_before = DocxPt(12)
                     p_fb.add_run().add_picture(img, width=Inches(5.5))
-                    p_leg = doc.add_paragraph(f"Ilustração: {img}")
-                    p_leg.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    doc.add_paragraph(f"Ilustração: {img}").alignment = WD_ALIGN_PARAGRAPH.CENTER
                     imagens_colocadas += 1
 
-    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
-    doc.save(caminho_final)
+    doc.save(os.path.join(os.getcwd(), nome_arquivo))
     return f"Documento Word '{nome_arquivo}' salvo com sucesso! {imagens_colocadas} imagens inseridas."
 
 
@@ -306,18 +296,18 @@ def criar_pdf(texto: str, nome_arquivo: str = "documento.pdf") -> str:
         if not linha:
             pdf.ln(5)
             continue
+        seguro = linha.encode('latin-1', 'replace').decode('latin-1')
         if len(linha) < 60 and not linha.endswith('.'):
             pdf.set_font('Arial', 'B', 14)
             pdf.set_text_color(0, 51, 102)
-            pdf.cell(0, 10, linha.encode('latin-1', 'replace').decode('latin-1'), ln=True)
+            pdf.cell(0, 10, seguro, ln=True)
             pdf.ln(2)
         else:
             pdf.set_font('Arial', '', 11)
             pdf.set_text_color(0, 0, 0)
-            pdf.multi_cell(0, 6, linha.encode('latin-1', 'replace').decode('latin-1'))
+            pdf.multi_cell(0, 6, seguro)
 
-    caminho_final = os.path.join(os.getcwd(), nome_arquivo)
-    pdf.output(caminho_final)
+    pdf.output(os.path.join(os.getcwd(), nome_arquivo))
     return f"PDF '{nome_arquivo}' criado com sucesso."
 
 
@@ -339,20 +329,41 @@ AZUL = '1F4E78'
 ZEBRA = 'F2F7FB'
 AMARELO_EDITAVEL = 'FFF2CC'
 
+ORDEM_CARTEIRA = [
+    ("ativo", "ticker", "papel"),
+    ("categoria", "classe", "tipo"),
+    ("preco",),
+    ("dividend", "yield", "dy"),
+    ("aporte",),
+    ("peso", "alocacao"),
+]
+
+_ACENTOS_COMUNS = {
+    "preco": "preço", "analise": "análise", "cenario": "cenário", "projecao": "projeção",
+    "descricao": "descrição", "media": "média", "medio": "médio", "numero": "número",
+    "mes": "mês", "periodo": "período", "inicio": "início", "codigo": "código",
+    "situacao": "situação", "informacao": "informação", "minimo": "mínimo",
+    "maximo": "máximo", "variacao": "variação", "acao": "ação", "acoes": "ações",
+    "observacao": "observação", "observacoes": "observações", "alocacao": "alocação",
+    "classificacao": "classificação", "patrimonio": "patrimônio", "cotacao": "cotação",
+    "salario": "salário", "usuario": "usuário", "regiao": "região", "producao": "produção",
+}
+_MINUSCULAS = {"de", "da", "do", "das", "dos", "e", "na", "no", "nas", "nos",
+               "em", "por", "para", "a", "o"}
+
 
 def _normalizar_quebras(texto: str) -> str:
-    """CORREÇÃO CRÍTICA: a IA costuma enviar a sequência literal '\\n' (barra + letra n)
-    em vez de uma quebra de linha real, o que fazia todo o insight virar uma única
-    linha gigante e ser cortado na célula."""
+    """Converte '\\n' literal enviado pela IA em quebra de linha real."""
     if not isinstance(texto, str):
         return ""
     texto = texto.replace('\\r\\n', '\n').replace('\\n', '\n').replace('\\t', ' ')
-    texto = texto.replace('\r\n', '\n').replace('\r', '\n')
-    return texto
+    return texto.replace('\r\n', '\n').replace('\r', '\n')
 
 
 def _para_float(valor, padrao=None):
     """Converte com segurança valores vindos da IA ('R$ 1.000,00', '13,5%', 0.135)."""
+    if isinstance(valor, bool):
+        return float(valor)
     if isinstance(valor, (int, float)):
         return float(valor)
     if not isinstance(valor, str):
@@ -396,46 +407,152 @@ def _classificar_coluna(nome_col):
     return "outro"
 
 
+def _chave(nome) -> str:
+    """Chave de comparação: sem acento, minúscula, sem espaço/_/-/."""
+    s = unicodedata.normalize("NFKD", str(nome))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[\s_\-\.`]+", "", s).lower()
+
+
+def _humanizar_nome(nome):
+    """'preco_de_compra' -> 'Preço de Compra' | 'dividendYield' -> 'Dividend Yield'."""
+    if isinstance(nome, int):
+        return nome
+    texto = str(nome).replace("`", "")
+    texto = re.sub(r"(?<=[a-zà-ú])(?=[A-Z])", " ", texto)
+    texto = re.sub(r"[_\-]+", " ", texto).strip()
+    palavras = []
+    for i, p in enumerate(texto.split()):
+        if p.isupper() and len(p) <= 5:
+            palavras.append(p)
+            continue
+        base = _ACENTOS_COMUNS.get(_chave(p), p.lower())
+        palavras.append(base if (i > 0 and base in _MINUSCULAS) else base[:1].upper() + base[1:])
+    return " ".join(palavras) or "Coluna"
+
+
+def _achar_coluna(df, *trechos):
+    """Busca tolerante: igualdade exata da chave primeiro, depois 'contém'."""
+    chaves = {c: _chave(c) for c in df.columns}
+    alvos = [_chave(t) for t in trechos]
+    for alvo in alvos:
+        for c, k in chaves.items():
+            if k == alvo:
+                return c
+    for alvo in alvos:
+        if len(alvo) < 3:
+            continue
+        for c, k in chaves.items():
+            if alvo in k:
+                return c
+    return None
+
+
+def _para_dataframe(dados) -> pd.DataFrame:
+    """Aceita lista de dicts, lista de listas, dict de listas ou DataFrame."""
+    if isinstance(dados, pd.DataFrame):
+        return dados.copy()
+    if isinstance(dados, dict):
+        if not dados:
+            return pd.DataFrame()
+        tam = max((len(v) if isinstance(v, (list, tuple)) else 1) for v in dados.values())
+        return pd.DataFrame({
+            k: (list(v) + [None] * (tam - len(v))) if isinstance(v, (list, tuple)) else [v] * tam
+            for k, v in dados.items()
+        })
+    if isinstance(dados, list):
+        if dados and all(isinstance(d, dict) for d in dados):
+            return pd.DataFrame(dados)
+        return pd.DataFrame([d for d in dados if isinstance(d, (list, tuple, dict))])
+    return pd.DataFrame()
+
+
+def _escapar_formula(valor):
+    """Impede que texto da IA começando com '=' vire fórmula."""
+    if isinstance(valor, str) and valor[:1] in ("=", "+", "@") and _para_float(valor, None) is None:
+        return "'" + valor
+    return valor
+
+
+def _padronizar_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Nomes legíveis e únicos, sem linhas vazias, sem NaN, fórmulas escapadas."""
+    if df is None or df.empty:
+        return pd.DataFrame({"Informação": ["Sem dados disponíveis"]})
+    novos, vistos = [], {}
+    for c in df.columns:
+        n = _humanizar_nome(c)
+        vistos[n] = vistos.get(n, 0) + 1
+        novos.append(n if vistos[n] == 1 else f"{n} ({vistos[n]})")
+    df = df.copy()
+    df.columns = novos
+    df = df.dropna(how="all").reset_index(drop=True)
+    df = df.map(_escapar_formula) if hasattr(df, "map") else df.applymap(_escapar_formula)
+    return df.astype(object).where(pd.notna(df), None)
+
+
 def _ordenar_colunas(df):
-    """A API do Gemini não garante a ordem das chaves do JSON, o que embaralhava as
-    colunas. Reordena logicamente: tempo -> identificadores -> moeda -> pct -> resto.
-    Também remove colunas com conteúdo duplicado."""
+    """Reordena: tempo -> ids -> moeda -> pct -> resto. Aplica ORDEM_CARTEIRA se for carteira."""
     tempo, ids, moeda, pct, outros = [], [], [], [], []
     for c in df.columns:
-        tipo = _classificar_coluna(c)
-        {"tempo": tempo, "id": ids, "moeda": moeda, "pct": pct}.get(tipo, outros).append(c)
-
-    ids.sort(key=lambda c: 0 if str(c).lower().strip() in ('ativo', 'ticker', 'papel') else 1)
-
+        {"tempo": tempo, "id": ids, "moeda": moeda, "pct": pct}.get(
+            _classificar_coluna(c), outros).append(c)
+    ids.sort(key=lambda c: 0 if _chave(c) in ("ativo", "ticker", "papel") else 1)
     df = df[tempo + ids + moeda + pct + outros]
 
-    colunas_manter, vistos = [], []
+    fixas = []
+    for trechos in ORDEM_CARTEIRA:
+        c = _achar_coluna(df, *trechos)
+        if c is not None and c not in fixas:
+            fixas.append(c)
+    if len(fixas) >= 3 and _achar_coluna(df, "aporte", "preco") is not None:
+        df = df[fixas + [c for c in df.columns if c not in fixas]]
+
+    manter, vistos = [], set()
     for c in df.columns:
         assinatura = tuple(df[c].astype(str).tolist())
         if assinatura in vistos:
             print(f"   - Removendo coluna duplicada: {c}")
             continue
-        vistos.append(assinatura)
-        colunas_manter.append(c)
+        vistos.add(assinatura)
+        manter.append(c)
+    return df[manter]
 
-    return df[colunas_manter]
+
+def _reconciliar_total(df, trecho_valor, alvo, trecho_peso=None, casas=2):
+    """Rateia a coluna de valor para somar EXATAMENTE `alvo`."""
+    col_v = _achar_coluna(df, trecho_valor)
+    if col_v is None or not alvo or alvo <= 0:
+        return df
+    col_p = _achar_coluna(df, trecho_peso) if trecho_peso else None
+
+    valores = df[col_v].map(lambda x: _para_float(x, 0.0) or 0.0).astype(float)
+    pesos = df[col_p].map(lambda x: _para_float(x, 0.0) or 0.0).astype(float) if col_p else None
+    base = pesos if (pesos is not None and pesos.sum() > 0) else valores
+    if base.sum() <= 0:
+        return df
+
+    novos = (base / base.sum() * alvo).round(casas)
+    residuo = round(alvo - novos.sum(), casas)
+    if residuo:
+        novos.iloc[int(novos.values.argmax())] += residuo
+
+    df = df.copy()
+    df[col_v] = novos.round(casas).tolist()
+    if col_p:
+        df[col_p] = (novos / alvo).round(4).tolist()
+    if round(valores.sum(), casas) != round(alvo, casas):
+        print(f"   - Total de '{col_v}' ajustado: {valores.sum():.2f} -> {alvo:.2f}")
+    return df
 
 
 def _formatar_tabela(ws, df, primeira_linha=1):
-    """Aplica estilos, converte números e ajusta larguras.
-    Retorna (colunas_moeda, colunas_porcentagem, col_tempo)."""
+    """Aplica estilos, converte números e ajusta larguras."""
     cor_fundo = PatternFill(start_color=AZUL, end_color=AZUL, fill_type='solid')
     fonte_branca = Font(bold=True, color='FFFFFF')
     zebra = PatternFill(start_color=ZEBRA, end_color=ZEBRA, fill_type='solid')
-    borda_fina = Border(
-        left=Side(style='thin', color='D9D9D9'),
-        right=Side(style='thin', color='D9D9D9'),
-        top=Side(style='thin', color='D9D9D9'),
-        bottom=Side(style='thin', color='D9D9D9')
-    )
+    borda_fina = Border(*(Side(style='thin', color='D9D9D9'),) * 4)
 
     col_tempo = _detectar_col_tempo(df)
-
     colunas_moeda, colunas_porcentagem = [], []
     for idx, col_name in enumerate(df.columns, start=1):
         tipo = _classificar_coluna(col_name)
@@ -456,20 +573,18 @@ def _formatar_tabela(ws, df, primeira_linha=1):
 
     for col_idx in range(1, len(df.columns) + 1):
         tamanho_max = len(str(ws.cell(row=primeira_linha, column=col_idx).value or "")) or 10
-
         for row_idx in range(primeira_linha + 1, primeira_linha + len(df) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.border = borda_fina
             if row_idx % 2 == 0:
                 cell.fill = zebra
 
-            # --- SISTEMA ANTI-ALUCINAÇÃO DA IA (padrão US/BR) ---
             if isinstance(cell.value, str) and (col_idx in colunas_moeda or col_idx in colunas_porcentagem):
-                novo_valor = _para_float(cell.value, None)
-                if novo_valor is not None:
-                    if col_idx in colunas_porcentagem and novo_valor > 1:
-                        novo_valor = novo_valor / 100
-                    cell.value = novo_valor
+                novo = _para_float(cell.value, None)
+                if novo is not None:
+                    if col_idx in colunas_porcentagem and novo > 1:
+                        novo /= 100
+                    cell.value = novo
 
             if col_idx in colunas_moeda and isinstance(cell.value, (int, float)):
                 cell.number_format = '"R$" #,##0.00'
@@ -493,29 +608,20 @@ def _formatar_tabela(ws, df, primeira_linha=1):
 
 
 def _rotular_apenas_ultimo_ponto(serie, indice_ultimo):
-    """Mostra o valor SOMENTE no último ponto da linha (valor final da projeção),
-    em vez de poluir o gráfico com 30 rótulos sobrepostos."""
+    """Mostra o valor SOMENTE no último ponto da linha."""
     dl = DataLabel(idx=indice_ultimo)
     dl.showVal = True
-    dl.showSerName = False
-    dl.showCatName = False
-    dl.showLegendKey = False
-    dl.showBubbleSize = False
-    dl.showPercent = False
+    dl.showSerName = dl.showCatName = dl.showLegendKey = False
+    dl.showBubbleSize = dl.showPercent = False
 
     serie.dLbls = DataLabelList()
     serie.dLbls.dLbl.append(dl)
-    serie.dLbls.showVal = False
-    serie.dLbls.showSerName = False
-    serie.dLbls.showCatName = False
-    serie.dLbls.showLegendKey = False
-    serie.dLbls.showBubbleSize = False
-    serie.dLbls.showPercent = False
+    serie.dLbls.showVal = serie.dLbls.showSerName = serie.dLbls.showCatName = False
+    serie.dLbls.showLegendKey = serie.dLbls.showBubbleSize = serie.dLbls.showPercent = False
 
 
 def _escrever_bloco_texto(ws, linha_inicial, titulo, texto, largura_colunas=10):
-    """Escreve texto longo em MÚLTIPLAS linhas (uma por parágrafo), com mesclagem
-    horizontal e altura calculada. Sem corte e sem linhas vazias inúteis."""
+    """Escreve texto longo em múltiplas linhas mescladas, com altura calculada."""
     col_fim = get_column_letter(max(largura_colunas, 8))
 
     cel_titulo = ws.cell(row=linha_inicial, column=1, value=titulo)
@@ -531,20 +637,15 @@ def _escrever_bloco_texto(ws, linha_inicial, titulo, texto, largura_colunas=10):
         largura_util += dim if dim else 10
     largura_util = max(int(largura_util), 60)
 
-    paragrafos = [p.strip() for p in texto.split('\n') if p.strip()]
-
     linha = linha_inicial + 1
-    for p in paragrafos:
+    for p in [p.strip() for p in texto.split('\n') if p.strip()]:
         cel = ws.cell(row=linha, column=1, value=p)
         negrito = bool(re.match(r'^\d+\.\s', p)) or (p.isupper() and len(p) > 3)
         cel.font = Font(bold=negrito, size=11, color=AZUL if negrito else "000000")
         cel.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left", indent=1)
         ws.merge_cells(f"A{linha}:{col_fim}{linha}")
-
-        linhas_visuais = max(1, -(-len(p) // largura_util))
-        ws.row_dimensions[linha].height = 16 * linhas_visuais + 4
+        ws.row_dimensions[linha].height = 16 * max(1, -(-len(p) // largura_util)) + 4
         linha += 1
-
     return linha
 
 
@@ -552,41 +653,49 @@ def _escrever_bloco_texto(ws, linha_inicial, titulo, texto, largura_colunas=10):
 # 1.2 MOTOR DE CÁLCULO ESPELHO (CACHE DE FÓRMULAS)
 # ==========================================
 
-def _fv(taxa_anual: float, anos: float, aporte_mensal: float, aporte_inicial: float) -> float:
-    """Replica EXATAMENTE a função FV do Excel usada na planilha:
-    =-FV((1+taxa)^(1/12)-1 ; anos*12 ; aporte_mensal ; aporte_inicial)
-    Capitalização mensal equivalente à taxa anual informada."""
-    i = (1 + taxa_anual) ** (1 / 12) - 1
+def _aportado(p: dict, anos: float) -> float:
+    """Total do próprio bolso (aporte corrigido pela inflação, se ativado)."""
+    g = (1 + p["inflacao"]) ** (1 / 12) - 1 if p.get("corrigir") else 0.0
     n = anos * 12
-    if i == 0:
-        return aporte_inicial + aporte_mensal * n
+    serie = ((1 + g) ** n - 1) / g if g else n
+    return p["aporte_inicial"] + p["aporte_mensal"] * serie
+
+
+def _fv(taxa_anual: float, anos: float, p: dict, liquido: bool = True) -> float:
+    """Espelho exato das fórmulas do Excel (aporte opcionalmente corrigido + IR)."""
+    i = (1 + taxa_anual) ** (1 / 12) - 1
+    g = (1 + p["inflacao"]) ** (1 / 12) - 1 if p.get("corrigir") else 0.0
+    n = anos * 12
     fator = (1 + i) ** n
-    return aporte_inicial * fator + aporte_mensal * (fator - 1) / i
+    if p.get("corrigir") and abs(i - g) > 1e-12:
+        serie = (fator - (1 + g) ** n) / (i - g)
+    elif i == 0:
+        serie = n
+    else:
+        serie = (fator - 1) / i
+    bruto = p["aporte_inicial"] * fator + p["aporte_mensal"] * serie
+    if not liquido:
+        return bruto
+    return bruto - p.get("ir", 0.0) * max(0.0, bruto - _aportado(p, anos))
 
 
 def _calcular_cache_premissas(p: dict) -> dict:
-    """Valores em cache das células calculadas da aba 'Premissas'."""
     anos = p["anos"]
-    taxa_pes = p["taxa_base"] - p["desvio_pes"]
-    taxa_oti = p["taxa_base"] + p["desvio_oti"]
-
-    total_aportado = p["aporte_inicial"] + p["aporte_mensal"] * anos * 12
-    base = _fv(p["taxa_base"], anos, p["aporte_mensal"], p["aporte_inicial"])
-    cdi = _fv(p["taxa_cdi"], anos, p["aporte_mensal"], p["aporte_inicial"])
-
+    total = _aportado(p, anos)
+    base = _fv(p["taxa_base"], anos, p)
+    cdi = _fv(p["taxa_cdi"], anos, p)
     return {
-        "B13": taxa_pes,
-        "B14": taxa_oti,
-        "B18": total_aportado,
+        "B13": p["taxa_base"] - p["desvio_pes"],
+        "B14": p["taxa_base"] + p["desvio_oti"],
+        "B18": total,
         "B19": base,
-        "B20": base - total_aportado,
+        "B20": base - total,
         "B21": base / ((1 + p["inflacao"]) ** anos),
         "B22": base - cdi,
     }
 
 
 def _calcular_cache_projecao(p: dict) -> dict:
-    """Valores em cache de toda a tabela de projeção (colunas B a G)."""
     cache = {}
     taxas = {
         "B": p["taxa_base"] - p["desvio_pes"],
@@ -597,8 +706,8 @@ def _calcular_cache_projecao(p: dict) -> dict:
     for ano in range(1, p["anos"] + 1):
         linha = ano + 1
         for col, taxa in taxas.items():
-            cache[f"{col}{linha}"] = _fv(taxa, ano, p["aporte_mensal"], p["aporte_inicial"])
-        cache[f"F{linha}"] = p["aporte_inicial"] + p["aporte_mensal"] * ano * 12
+            cache[f"{col}{linha}"] = _fv(taxa, ano, p)
+        cache[f"F{linha}"] = _aportado(p, ano)
         cache[f"G{linha}"] = cache[f"C{linha}"] / ((1 + p["inflacao"]) ** ano)
     return cache
 
@@ -612,15 +721,14 @@ NS_REL_DOC = "http://schemas.openxmlformats.org/officeDocument/2006/relationship
 
 
 def _mapear_abas_xlsx(zf: zipfile.ZipFile) -> dict:
-    """Descobre qual arquivo XML interno corresponde a cada nome de aba."""
+    """Descobre qual XML interno corresponde a cada aba."""
     wb_xml = ET.fromstring(zf.read("xl/workbook.xml"))
     rels_xml = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
 
     rels = {}
     for rel in rels_xml:
         alvo = rel.get("Target", "")
-        alvo = alvo[1:] if alvo.startswith("/") else (
-            alvo if alvo.startswith("xl/") else f"xl/{alvo}")
+        alvo = alvo[1:] if alvo.startswith("/") else (alvo if alvo.startswith("xl/") else f"xl/{alvo}")
         rels[rel.get("Id")] = alvo.replace("xl/xl/", "xl/")
 
     mapa = {}
@@ -641,18 +749,13 @@ def _patch_sheet_xml(conteudo: bytes, valores: dict) -> bytes:
         ref = celula.get("r")
         if ref not in valores or celula.find(tag_f) is None:
             continue
-
         valor = valores[ref]
-        if valor is None or (isinstance(valor, float) and valor != valor):  # NaN
+        if valor is None or (isinstance(valor, float) and valor != valor):
             continue
-
         for antigo in celula.findall(tag_v):
             celula.remove(antigo)
-
         elem_v = ET.SubElement(celula, tag_v)
         elem_v.text = repr(round(float(valor), 10)) if isinstance(valor, float) else str(valor)
-
-        # célula de fórmula numérica não deve carregar t="s"/t="str"
         if celula.get("t") in ("s", "str"):
             del celula.attrib["t"]
 
@@ -660,29 +763,22 @@ def _patch_sheet_xml(conteudo: bytes, valores: dict) -> bytes:
 
 
 def _injetar_cache_formulas(caminho: str, cache_por_aba: dict) -> bool:
-    """Reescreve o .xlsx adicionando os resultados calculados junto às fórmulas.
-    Assim a planilha funciona nos dois mundos:
-      - Excel/LibreOffice: recalcula ao vivo pelas fórmulas;
-      - pandas/openpyxl: lê os números do cache, sem precisar abrir o Excel."""
+    """Grava os resultados calculados junto às fórmulas (Excel + pandas)."""
     if not cache_por_aba:
         return False
-
     temporario = caminho + ".tmp"
     try:
         with zipfile.ZipFile(caminho, "r") as origem:
             mapa = _mapear_abas_xlsx(origem)
             destinos = {mapa[a]: v for a, v in cache_por_aba.items() if a in mapa}
-
             with zipfile.ZipFile(temporario, "w", zipfile.ZIP_DEFLATED) as saida:
                 for item in origem.infolist():
                     dados = origem.read(item.filename)
                     if item.filename in destinos:
                         dados = _patch_sheet_xml(dados, destinos[item.filename])
                     saida.writestr(item, dados)
-
         shutil.move(temporario, caminho)
-        total = sum(len(v) for v in cache_por_aba.values())
-        print(f"   - Cache de fórmulas injetado: {total} células calculadas gravadas.")
+        print(f"   - Cache de fórmulas injetado: {sum(len(v) for v in cache_por_aba.values())} células.")
         return True
     except Exception as e:
         print(f"      ⚠️ Falha ao injetar cache de fórmulas: {e}")
@@ -695,11 +791,11 @@ def _injetar_cache_formulas(caminho: str, cache_por_aba: dict) -> bool:
 # 1.4 ABA DE PREMISSAS EDITÁVEIS
 # ------------------------------------------
 
-# Endereços fixos usados pelas fórmulas da projeção
 CEL = {
     "aporte_inicial": "Premissas!$B$4",
     "aporte_mensal": "Premissas!$B$5",
     "anos": "Premissas!$B$6",
+    "corrigir": "Premissas!$B$7",
     "taxa_base": "Premissas!$B$9",
     "taxa_cdi": "Premissas!$B$10",
     "desvio_pes": "Premissas!$B$11",
@@ -707,15 +803,40 @@ CEL = {
     "taxa_pes": "Premissas!$B$13",
     "taxa_oti": "Premissas!$B$14",
     "inflacao": "Premissas!$B$15",
+    "ir": "Premissas!$B$16",
 }
 
 
+def _expr_aportado(anos):
+    """Fórmula Excel: total do próprio bolso."""
+    ai, am, cor, inf = CEL["aporte_inicial"], CEL["aporte_mensal"], CEL["corrigir"], CEL["inflacao"]
+    return (f"({ai}+{am}*IF(AND({cor}=1,{inf}<>0),"
+            f"((1+{inf})^({anos})-1)/((1+{inf})^(1/12)-1),({anos})*12))")
+
+
+def _expr_bruto(taxa, anos):
+    """Fórmula Excel: valor futuro bruto (série uniforme ou crescente)."""
+    ai, am, cor, inf = CEL["aporte_inicial"], CEL["aporte_mensal"], CEL["corrigir"], CEL["inflacao"]
+    i = f"((1+{taxa})^(1/12)-1)"
+    g = f"((1+{inf})^(1/12)-1)"
+    F = f"(1+{taxa})^({anos})"
+    G = f"(1+{inf})^({anos})"
+    serie = (f"IF(AND({cor}=1,{inf}<>{taxa}),({F}-{G})/({i}-{g}),"
+             f"IF({taxa}=0,({anos})*12,({F}-1)/{i}))")
+    return f"({ai}*{F}+{am}*{serie})"
+
+
+def _expr_liquido(taxa, anos):
+    """Fórmula Excel: bruto menos IR sobre o ganho."""
+    b = _expr_bruto(taxa, anos)
+    return f"({b}-{CEL['ir']}*MAX(0,{b}-{_expr_aportado(anos)}))"
+
+
 def _criar_aba_premissas(wb, params):
-    """Cria a aba 'Premissas' com células AMARELAS editáveis. Alterar qualquer valor
-    aqui recalcula toda a projeção e os 3 cenários automaticamente no Excel."""
+    """Aba 'Premissas' com células AMARELAS editáveis que recalculam tudo."""
     ws = wb.create_sheet("Premissas")
     ws.sheet_view.showGridLines = False
-    ws.column_dimensions['A'].width = 42
+    ws.column_dimensions['A'].width = 46
     ws.column_dimensions['B'].width = 20
     ws.column_dimensions['C'].width = 60
 
@@ -746,8 +867,7 @@ def _criar_aba_premissas(wb, params):
         obs.font = Font(size=9, color="808080", italic=True)
         obs.alignment = Alignment(indent=1)
 
-    t = ws.cell(row=1, column=1, value="⚙️ PAINEL DE PREMISSAS EDITÁVEIS")
-    t.font = Font(bold=True, size=16, color=AZUL)
+    ws.cell(row=1, column=1, value="⚙️ PAINEL DE PREMISSAS EDITÁVEIS").font = Font(bold=True, size=16, color=AZUL)
     ws.cell(row=2, column=1,
             value="Altere APENAS as células amarelas. Toda a projeção e os gráficos recalculam sozinhos."
             ).font = Font(size=10, italic=True, color="C00000")
@@ -759,6 +879,8 @@ def _criar_aba_premissas(wb, params):
           "Valor investido todo mês, com dividendos reinvestidos.")
     campo(6, "Prazo (anos)", params["anos"], '0',
           "Horizonte da projeção. A tabela é gerada com o prazo máximo definido na criação.")
+    campo(7, "Corrigir aporte pela inflação? (1=sim, 0=não)", 1 if params.get("corrigir") else 0, '0',
+          "Se 1, o aporte mensal cresce pelo IPCA (mantém o poder de compra).")
 
     secao(8, "TAXAS DE RETORNO (a.a.)")
     campo(9, "Cenário Base — Carteira", params["taxa_base"], '0.00%',
@@ -767,54 +889,49 @@ def _criar_aba_premissas(wb, params):
           "Taxa livre de risco usada como comparação.")
     campo(11, "Desvio Cenário Pessimista", params["desvio_pes"], '0.00%',
           "Quanto subtrair da taxa base (ex.: 4% => base menos 4 p.p.).")
-    campo(12, "Desvio Cenário Otimista", params["desvio_oti"], '0.00%',
-          "Quanto somar à taxa base.")
+    campo(12, "Desvio Cenário Otimista", params["desvio_oti"], '0.00%', "Quanto somar à taxa base.")
     campo(13, "→ Taxa Pessimista (calculada)", None, '0.00%',
           "Fórmula automática: Base - Desvio.", editavel=False, formula="=B9-B11")
     campo(14, "→ Taxa Otimista (calculada)", None, '0.00%',
           "Fórmula automática: Base + Desvio.", editavel=False, formula="=B9+B12")
     campo(15, "Inflação estimada (IPCA)", params["inflacao"], '0.00%',
-          "Usada para calcular o patrimônio em valores de hoje (poder de compra).")
+          "Usada para o poder de compra e para corrigir o aporte.")
+    campo(16, "Alíquota de IR sobre o ganho", params.get("ir", 0.15), '0.00%',
+          "Descontada no resgate (ex.: 15%). Use 0% para ver valores brutos.")
 
-    secao(17, "RESULTADOS NO FIM DO PRAZO")
-    ws.cell(row=18, column=1, value="Total Aportado (nominal)").font = Font(bold=True)
-    c18 = ws.cell(row=18, column=2, value="=B4+(B5*B6*12)")
-    c18.number_format = '"R$" #,##0.00'
-    c18.font = Font(bold=True, color=AZUL)
-    ws.cell(row=18, column=3, value="Soma do capital do próprio bolso, sem rendimento."
-            ).font = Font(size=9, italic=True, color="808080")
+    secao(17, "RESULTADOS NO FIM DO PRAZO (LÍQUIDOS DE IR)")
+    anos_ref = "$B$6"
+    resultados = [
+        (18, "Total Aportado", "=" + _expr_aportado(anos_ref), AZUL,
+         "Capital do próprio bolso (inclui correção, se ativada)."),
+        (19, "Patrimônio Final — Cenário Base", "=" + _expr_liquido(CEL["taxa_base"], anos_ref), "006100",
+         "Juros compostos mensais, já descontado o IR."),
+        (20, "Juros Ganhos (Base, líquido)", "=B19-B18", "006100", ""),
+        (21, "Poder de Compra Hoje (Base)", "=B19/((1+B15)^B6)", "9C6500",
+         "Patrimônio final descontada a inflação do período."),
+        (22, "Vantagem sobre o CDI (líquida)", "=B19-" + _expr_liquido(CEL["taxa_cdi"], anos_ref),
+         "C00000", "Ambos tributados pela mesma alíquota."),
+    ]
+    for linha, rotulo, formula, cor, ajuda in resultados:
+        ws.cell(row=linha, column=1, value=rotulo).font = Font(bold=True)
+        c = ws.cell(row=linha, column=2, value=formula)
+        c.number_format = '"R$" #,##0.00'
+        c.font = Font(bold=True, color=cor, size=12 if linha == 19 else 11)
+        if ajuda:
+            ws.cell(row=linha, column=3, value=ajuda).font = Font(size=9, italic=True, color="808080")
 
-    ws.cell(row=19, column=1, value="Patrimônio Final — Cenário Base").font = Font(bold=True)
-    c19 = ws.cell(row=19, column=2, value="=-FV((1+B9)^(1/12)-1,B6*12,B5,B4)")
-    c19.number_format = '"R$" #,##0.00'
-    c19.font = Font(bold=True, size=12, color="006100")
-    ws.cell(row=19, column=3, value="Juros compostos com capitalização mensal."
-            ).font = Font(size=9, italic=True, color="808080")
+    ws.cell(row=24, column=1,
+            value="⚠️ Simulação educacional. Não é recomendação de investimento. "
+                  "Rentabilidade passada não garante rentabilidade futura."
+            ).font = Font(size=9, italic=True, color="C00000")
 
-    ws.cell(row=20, column=1, value="Juros Ganhos (Base)").font = Font(bold=True)
-    c20 = ws.cell(row=20, column=2, value="=B19-B18")
-    c20.number_format = '"R$" #,##0.00'
-    c20.font = Font(bold=True, color="006100")
-
-    ws.cell(row=21, column=1, value="Poder de Compra Hoje (Base)").font = Font(bold=True)
-    c21 = ws.cell(row=21, column=2, value="=B19/((1+B15)^B6)")
-    c21.number_format = '"R$" #,##0.00'
-    c21.font = Font(bold=True, color="9C6500")
-    ws.cell(row=21, column=3, value="Patrimônio final descontada a inflação do período."
-            ).font = Font(size=9, italic=True, color="808080")
-
-    ws.cell(row=22, column=1, value="Vantagem sobre o CDI").font = Font(bold=True)
-    c22 = ws.cell(row=22, column=2, value="=B19-(-FV((1+B10)^(1/12)-1,B6*12,B5,B4))")
-    c22.number_format = '"R$" #,##0.00'
-    c22.font = Font(bold=True, color="C00000")
-
-    # Validações: impede taxas absurdas / negativas por digitação errada
+    # Validações
     dv_taxa = DataValidation(type="decimal", operator="between", formula1="-0.5", formula2="1",
                              allow_blank=False, showErrorMessage=True,
                              error="Informe a taxa em formato decimal entre -50% e 100%.",
                              errorTitle="Taxa inválida")
     ws.add_data_validation(dv_taxa)
-    for ref in ("B9", "B10", "B11", "B12", "B15"):
+    for ref in ("B9", "B10", "B11", "B12", "B15", "B16"):
         dv_taxa.add(ws[ref])
 
     dv_prazo = DataValidation(type="whole", operator="between", formula1="1", formula2="60",
@@ -823,80 +940,59 @@ def _criar_aba_premissas(wb, params):
     ws.add_data_validation(dv_prazo)
     dv_prazo.add(ws["B6"])
 
+    dv_bin = DataValidation(type="list", formula1='"0,1"', showErrorMessage=True,
+                            error="Use 1 (sim) ou 0 (não).", errorTitle="Valor inválido")
+    ws.add_data_validation(dv_bin)
+    dv_bin.add(ws["B7"])
+
     return ws
 
 
 def _montar_projecao_com_formulas(ws, anos, titulo_colunas=None):
-    """Escreve a tabela de projeção usando FÓRMULAS FV nativas do Excel, ligadas à
-    aba Premissas. Gera 3 cenários + CDI, tudo recalculável pelo usuário."""
+    """Tabela de projeção com fórmulas ligadas à aba Premissas (3 cenários + CDI)."""
     cabecalhos = titulo_colunas or ["Ano", "Cenário Pessimista", "Cenário Base",
                                     "Cenário Otimista", "Benchmark CDI",
                                     "Total Aportado", "Base (valor de hoje)"]
     ws.append(cabecalhos)
-
-    taxas = {
-        2: CEL["taxa_pes"],
-        3: CEL["taxa_base"],
-        4: CEL["taxa_oti"],
-        5: CEL["taxa_cdi"],
-    }
+    taxas = {2: CEL["taxa_pes"], 3: CEL["taxa_base"], 4: CEL["taxa_oti"], 5: CEL["taxa_cdi"]}
 
     for i in range(1, anos + 1):
         linha = i + 1
         ws.cell(row=linha, column=1, value=i)
+        anos_ref = f"A{linha}"
         for col, taxa in taxas.items():
-            ws.cell(
-                row=linha, column=col,
-                value=(f"=-FV((1+{taxa})^(1/12)-1,A{linha}*12,"
-                       f"{CEL['aporte_mensal']},{CEL['aporte_inicial']})")
-            )
-        ws.cell(row=linha, column=6,
-                value=f"={CEL['aporte_inicial']}+({CEL['aporte_mensal']}*A{linha}*12)")
-        ws.cell(row=linha, column=7,
-                value=f"=C{linha}/((1+{CEL['inflacao']})^A{linha})")
-
+            ws.cell(row=linha, column=col, value="=" + _expr_liquido(taxa, anos_ref))
+        ws.cell(row=linha, column=6, value="=" + _expr_aportado(anos_ref))
+        ws.cell(row=linha, column=7, value=f"=C{linha}/((1+{CEL['inflacao']})^A{linha})")
     return cabecalhos
 
 
 def _aplicar_formatacao_condicional_carteira(ws, df_at, ultima_linha):
-    """Ícones de tendência no Dividend Yield, barras de dados no Aporte e
-    escala de cores no Peso da Carteira."""
+    """Ícones no DY, barras de dados no Aporte e escala de cores no Peso."""
     mapa = {}
     for i, c in enumerate(df_at.columns, start=1):
-        nome = str(c).lower()
+        nome = _chave(c)
         letra = get_column_letter(i)
         faixa = f"{letra}2:{letra}{ultima_linha}"
-        if 'yield' in nome or nome.strip() in ('dy',) or 'dividend' in nome:
+        if 'yield' in nome or nome == 'dy' or 'dividend' in nome:
             mapa['dy'] = faixa
         elif 'aporte' in nome:
             mapa['aporte'] = faixa
-        elif 'peso' in nome or 'alocação' in nome or 'alocacao' in nome:
+        elif 'peso' in nome or 'alocacao' in nome:
             mapa['peso'] = faixa
-        elif 'preço' in nome or 'preco' in nome:
+        elif 'preco' in nome:
             mapa['preco'] = faixa
 
     if 'dy' in mapa:
-        # 3 setas: verde (DY alto), amarela (médio), vermelha (baixo/sem provento)
-        regra = IconSetRule('3Arrows', 'num', ['0.02', '0.06'], showValue=True)
-        ws.conditional_formatting.add(mapa['dy'], regra)
-
+        ws.conditional_formatting.add(mapa['dy'], IconSetRule('3Arrows', 'num', ['0.02', '0.06'], showValue=True))
     if 'aporte' in mapa:
-        ws.conditional_formatting.add(
-            mapa['aporte'],
-            DataBarRule(start_type='num', start_value=0, end_type='max',
-                        color="1F4E78", showValue=True)
-        )
-
+        ws.conditional_formatting.add(mapa['aporte'], DataBarRule(
+            start_type='num', start_value=0, end_type='max', color="1F4E78", showValue=True))
     if 'peso' in mapa:
-        ws.conditional_formatting.add(
-            mapa['peso'],
-            ColorScaleRule(start_type='min', start_color='FFFFFF',
-                           end_type='max', end_color='9BC2E6')
-        )
-
+        ws.conditional_formatting.add(mapa['peso'], ColorScaleRule(
+            start_type='min', start_color='FFFFFF', end_type='max', end_color='9BC2E6'))
     return mapa
-
-
+ 
 def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: str = "dados.xlsx",
                          ativos: list = None, titulo_grafico: str = None,
                          premissas: dict = None) -> str:
@@ -913,6 +1009,9 @@ def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: s
 
     Abas: 'Premissas', 'Projeção e Análise', 'Carteira Recomendada' e 'Dashboard'.
     """
+    nome_arquivo = re.sub(r'[<>:"/\\|?*]', "_", str(nome_arquivo or "")).strip() or "dados.xlsx"
+    if not nome_arquivo.lower().endswith(".xlsx"):
+        nome_arquivo += ".xlsx"
     print(f"📊 Gerando Excel Inteligente: {nome_arquivo}")
 
     modo_dinamico = bool(premissas)
@@ -997,17 +1096,17 @@ def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: s
     # MODO B: TABELA ESTÁTICA (compatibilidade retroativa)
     # =========================================================
     else:
-        df = pd.DataFrame(dados)
+        df = _para_dataframe(dados)
 
         if list(df.columns) == [0, 1]:
             df.columns = ["Categoria", "Valor"]
         elif list(df.columns) == [0, 1, 2]:
             df.columns = ["Grupo", "Categoria", "Valor"]
 
-        df = _ordenar_colunas(df)
+        df = _ordenar_colunas(_padronizar_df(df))
 
         for c in df.columns:
-            if str(c).lower() in ['contexto', 'grupo', 'tipo', 'classificação']:
+            if _chave(c) in ['contexto', 'grupo', 'tipo', 'classificacao']:
                 col_agrupador = c
                 break
 
@@ -1044,7 +1143,12 @@ def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: s
     col_aporte = None
     if ativos:
         try:
-            df_at = _ordenar_colunas(pd.DataFrame(ativos))
+            df_at = _padronizar_df(_para_dataframe(ativos))
+            if params_dinamicos and params_dinamicos["aporte_mensal"] > 0:
+                df_at = _reconciliar_total(df_at, "aporte", params_dinamicos["aporte_mensal"],
+                                           trecho_peso="peso")
+            df_at = _ordenar_colunas(df_at)
+
             ws2 = wb.create_sheet("Carteira Recomendada")
             for r in dataframe_to_rows(df_at, index=False, header=True):
                 ws2.append(r)
@@ -1055,7 +1159,7 @@ def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: s
             _aplicar_formatacao_condicional_carteira(ws2, df_at, ultima_linha_at)
 
             for i, c in enumerate(df_at.columns, start=1):
-                if 'aporte' in str(c).lower():
+                if 'aporte' in _chave(c):
                     col_aporte = i
                     break
 
@@ -1083,10 +1187,10 @@ def criar_planilha_excel(dados: list = None, insights: str = "", nome_arquivo: s
                 cel_total.alignment = Alignment(horizontal='right')
 
                 # Cache do total, para leitura sem abrir o Excel
-                soma_aportes = sum(
+                soma_aportes = round(sum(
                     v for v in (_para_float(x, None) for x in df_at.iloc[:, col_aporte - 1])
                     if v is not None
-                )
+                ), 2)
                 cache_carteira = {f"{letra}{linha_total}": soma_aportes}
 
                 # Legenda dos ícones de tendência
@@ -1446,3 +1550,53 @@ FERRAMENTAS = {
     "abrir_pagina": abrir_pagina,
     "cotacao_moeda": cotacao_moeda
 }
+
+# ==========================================
+# COTAÇÕES EM TEMPO REAL (B3)
+# ==========================================
+
+def buscar_cotacoes(tickers: list) -> list:
+    """Retorna preço atual, DY, fonte e data de cada ticker da B3.
+    Usa brapi.dev (token opcional em BRAPI_TOKEN no .env) e yfinance como fallback."""
+    token = os.getenv("BRAPI_TOKEN", "")
+    resultado = []
+
+    for t in tickers:
+        t = str(t).upper().replace(".SA", "").strip()
+        item = {"ativo": t, "preco": None, "dividend_yield": None, "fonte": None, "data": None}
+
+        try:
+            url = f"https://brapi.dev/api/quote/{t}?fundamental=true"
+            if token:
+                url += f"&token={token}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200 and r.json().get("results"):
+                d = r.json()["results"][0]
+                item["preco"] = d.get("regularMarketPrice")
+                dy = d.get("dividendYield")
+                if dy is not None:
+                    item["dividend_yield"] = dy / 100 if dy > 1 else dy
+                item["fonte"] = "brapi.dev"
+                item["data"] = (d.get("regularMarketTime") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+        except Exception as e:
+            print(f"   - brapi falhou para {t}: {e}")
+
+        if item["preco"] is None:
+            try:
+                import yfinance as yf
+                tk = yf.Ticker(f"{t}.SA")
+                item["preco"] = round(float(tk.fast_info["last_price"]), 2)
+                dy = tk.info.get("dividendYield")
+                if dy is not None:
+                    item["dividend_yield"] = dy / 100 if dy > 1 else dy
+                item["fonte"] = "Yahoo Finance"
+                item["data"] = datetime.now().strftime("%Y-%m-%d")
+            except Exception as e:
+                print(f"   - yfinance falhou para {t}: {e}")
+                item["fonte"] = "indisponível"
+
+        resultado.append(item)
+        time.sleep(0.5)
+
+    print(f"💹 Cotações obtidas: {sum(1 for i in resultado if i['preco'])}/{len(resultado)}")
+    return resultado
